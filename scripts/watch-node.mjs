@@ -259,22 +259,24 @@ const releaseWatchLock = (lockHandle) => {
  * }} [params]
  */
 export async function runWatchMain(params = {}) {
+  // 解析命令行参数和环境变量，支持依赖注入（便于测试/扩展）
   const rawArgs = params.args ?? process.argv.slice(2);
   const rawEnv = params.env ? { ...params.env } : { ...process.env };
   const watchArgs = resolveWatchArgs(rawArgs, rawEnv);
+  // deps对象聚合所有可注入依赖，便于mock和自定义
   const deps = {
-    spawn: params.spawn ?? spawn,
-    process: params.process ?? process,
-    cwd: params.cwd ?? process.cwd(),
-    args: watchArgs.runnerArgs,
-    env: rawEnv,
-    now: params.now ?? Date.now,
-    sleep: params.sleep ?? sleep,
-    signalProcess: params.signalProcess ?? ((pid, signal) => process.kill(pid, signal)),
-    lockDisabled: params.lockDisabled === true,
+    spawn: params.spawn ?? spawn, // 子进程启动器
+    process: params.process ?? process, // 当前进程对象
+    cwd: params.cwd ?? process.cwd(), // 工作目录
+    args: watchArgs.runnerArgs, // 传递给子进程的参数
+    env: rawEnv, // 环境变量
+    now: params.now ?? Date.now, // 当前时间戳
+    sleep: params.sleep ?? sleep, // 延迟函数
+    signalProcess: params.signalProcess ?? ((pid, signal) => process.kill(pid, signal)), // 进程信号发送
+    lockDisabled: params.lockDisabled === true, // 是否禁用watch锁
     createWatcher:
-      params.createWatcher ?? ((watchPaths, options) => chokidar.watch(watchPaths, options)),
-    watchPaths: params.watchPaths ?? runNodeWatchedPaths,
+      params.createWatcher ?? ((watchPaths, options) => chokidar.watch(watchPaths, options)), // 文件变更监听器
+    watchPaths: params.watchPaths ?? runNodeWatchedPaths, // 监听的路径集合
   };
 
   const childEnv = { ...deps.env };
@@ -309,21 +311,24 @@ export async function runWatchMain(params = {}) {
     childEnv[WATCH_ALLOW_RUNTIME_POSTBUILD_FAILURE_ENV_KEY] = "1";
   }
 
+  // 主watch流程：监听文件变更，自动重启子进程
   return await new Promise((resolve) => {
-    let settled = false;
-    let shuttingDown = false;
-    let restartRequested = false;
-    let watchProcess = null;
-    let lockHandle = null;
+    let settled = false; // 是否已完成清理
+    let shuttingDown = false; // 是否正在关闭
+    let restartRequested = false; // 是否请求重启
+    let watchProcess = null; // 当前子进程
+    let lockHandle = null; // watch锁句柄
     let onSigInt;
     let onSigTerm;
 
+    // 创建文件变更watcher，监听指定路径，忽略无关变更
     const watcher = deps.createWatcher(deps.watchPaths, {
-      ignoreInitial: true,
+      ignoreInitial: true, // 启动时不触发已有文件事件
       ignored: (watchPath, stats) =>
-        isIgnoredWatchPath(watchPath, deps.cwd, deps.watchPaths, stats),
+        isIgnoredWatchPath(watchPath, deps.cwd, deps.watchPaths, stats), // 忽略规则
     });
 
+    // 统一清理函数，确保信号/资源释放
     const settle = (code) => {
       if (settled) {
         return;
@@ -344,17 +349,20 @@ export async function runWatchMain(params = {}) {
       childEnv[WATCH_RUNNER_CHILD_INSPECT_ENV_KEY] = childInspectArg;
     }
 
+    // 启动/重启被watch的子进程
     const startRunner = () => {
       watchProcess = deps.spawn(deps.process.execPath, buildRunnerArgs(deps.args), {
         cwd: deps.cwd,
         env: childEnv,
         stdio: "inherit",
       });
+      // 子进程启动失败
       watchProcess.on("error", (error) => {
         watchProcess = null;
         logWatcher(`Failed to spawn watcher child: ${error?.message ?? "unknown error"}`, deps);
         settle(1);
       });
+      // 子进程退出，根据退出码/信号判断是否自动重启
       watchProcess.on("exit", (exitCode, exitSignal) => {
         watchProcess = null;
         if (shuttingDown) {
@@ -369,6 +377,7 @@ export async function runWatchMain(params = {}) {
       });
     };
 
+    // 文件变更时触发重启逻辑
     const requestRestart = (changedPath) => {
       if (shuttingDown || isIgnoredWatchPath(changedPath, deps.cwd, deps.watchPaths)) {
         return;
@@ -383,9 +392,11 @@ export async function runWatchMain(params = {}) {
       }
     };
 
+    // 监听文件增删改，触发自动重启
     watcher.on("add", requestRestart);
     watcher.on("change", requestRestart);
     watcher.on("unlink", requestRestart);
+    // 监听器自身出错时，安全关闭
     watcher.on("error", () => {
       shuttingDown = true;
       if (watchProcess && typeof watchProcess.kill === "function") {
@@ -394,6 +405,7 @@ export async function runWatchMain(params = {}) {
       settle(1);
     });
 
+    // 捕获 SIGINT/SIGTERM 信号，优雅关闭watcher和子进程
     onSigInt = () => {
       shuttingDown = true;
       if (watchProcess && typeof watchProcess.kill === "function") {

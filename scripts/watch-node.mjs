@@ -16,8 +16,55 @@ const WATCH_IGNORED_PATH_SEGMENTS = new Set([".git", "dist", "node_modules"]);
 const WATCH_LOCK_WAIT_MS = 5_000;
 const WATCH_LOCK_POLL_MS = 100;
 const WATCH_LOCK_DIR = path.join(".local", "watch-node");
+const WATCH_CHILD_INSPECT_ENV_KEY = "OPENCLAW_WATCH_CHILD_INSPECT";
+const WATCH_CHILD_INSPECT_ARG_KEY = "--watch-child-inspect";
+const WATCH_BUILD_SOURCEMAP_ENV_KEY = "OPENCLAW_BUILD_SOURCEMAP";
+const WATCH_RUNNER_CHILD_INSPECT_ENV_KEY = "OPENCLAW_CHILD_INSPECT";
+const WATCH_ALLOW_RUNTIME_POSTBUILD_FAILURE_ENV_KEY = "OPENCLAW_ALLOW_RUNTIME_POSTBUILD_FAILURE";
 
 const buildRunnerArgs = (args) => [WATCH_NODE_RUNNER, ...args];
+
+const parseWatchChildInspectArg = (rawValue) => {
+  const value = String(rawValue ?? "").trim();
+  if (!value) {
+    return null;
+  }
+  if (/^\d+$/.test(value)) {
+    return `--inspect=${value}`;
+  }
+  if (/^--inspect(?:-brk)?(?:=.*)?$/.test(value)) {
+    return value;
+  }
+  return null;
+};
+
+const resolveWatchArgs = (args, env) => {
+  const runnerArgs = [];
+  let childInspectRaw = env?.[WATCH_CHILD_INSPECT_ENV_KEY] ?? null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index] ?? "");
+    if (arg.startsWith(`${WATCH_CHILD_INSPECT_ARG_KEY}=`)) {
+      childInspectRaw = arg.slice(`${WATCH_CHILD_INSPECT_ARG_KEY}=`.length);
+      continue;
+    }
+    if (arg === WATCH_CHILD_INSPECT_ARG_KEY) {
+      const next = args[index + 1];
+      if (typeof next === "string" && next.length > 0) {
+        childInspectRaw = next;
+        index += 1;
+      }
+      continue;
+    }
+    runnerArgs.push(arg);
+  }
+
+  return {
+    runnerArgs,
+    childInspectArg: parseWatchChildInspectArg(childInspectRaw),
+    childInspectRaw,
+  };
+};
 
 const normalizePath = (filePath) =>
   String(filePath ?? "")
@@ -212,12 +259,15 @@ const releaseWatchLock = (lockHandle) => {
  * }} [params]
  */
 export async function runWatchMain(params = {}) {
+  const rawArgs = params.args ?? process.argv.slice(2);
+  const rawEnv = params.env ? { ...params.env } : { ...process.env };
+  const watchArgs = resolveWatchArgs(rawArgs, rawEnv);
   const deps = {
     spawn: params.spawn ?? spawn,
     process: params.process ?? process,
     cwd: params.cwd ?? process.cwd(),
-    args: params.args ?? process.argv.slice(2),
-    env: params.env ? { ...params.env } : { ...process.env },
+    args: watchArgs.runnerArgs,
+    env: rawEnv,
     now: params.now ?? Date.now,
     sleep: params.sleep ?? sleep,
     signalProcess: params.signalProcess ?? ((pid, signal) => process.kill(pid, signal)),
@@ -229,6 +279,7 @@ export async function runWatchMain(params = {}) {
 
   const childEnv = { ...deps.env };
   const watchSession = `${deps.now()}-${deps.process.pid}`;
+  const childInspectArg = watchArgs.childInspectArg;
   childEnv.OPENCLAW_WATCH_MODE = "1";
   childEnv.OPENCLAW_WATCH_SESSION = watchSession;
   // The watcher owns process restarts; keep SIGUSR1/config reloads in-process
@@ -236,6 +287,26 @@ export async function runWatchMain(params = {}) {
   childEnv.OPENCLAW_NO_RESPAWN = "1";
   if (deps.args.length > 0) {
     childEnv.OPENCLAW_WATCH_COMMAND = deps.args.join(" ");
+  }
+  //if (
+  //  watchArgs.childInspectRaw &&
+  //  !childInspectArg &&
+  //  childEnv.OPENCLAW_RUNNER_LOG !== "0"
+  //) {
+  //  logWatcher(
+  //    `Ignoring watch child inspect value \"${watchArgs.childInspectRaw}\" (expected a port or --inspect/--inspect-brk flag).`,
+  //    deps,
+  //  );
+  //}
+  if (childInspectArg && !childEnv[WATCH_BUILD_SOURCEMAP_ENV_KEY]) {
+    // Bound breakpoints in TypeScript require dist sourcemaps while debugging
+    // the watched child process.
+    childEnv[WATCH_BUILD_SOURCEMAP_ENV_KEY] = "1";
+  }
+  if (childInspectArg && !childEnv[WATCH_ALLOW_RUNTIME_POSTBUILD_FAILURE_ENV_KEY]) {
+    // Keep watch-debug usable even when optional runtime postbuild staging
+    // (for example bundled channel npm installs) fails on local machines.
+    childEnv[WATCH_ALLOW_RUNTIME_POSTBUILD_FAILURE_ENV_KEY] = "1";
   }
 
   return await new Promise((resolve) => {
@@ -268,6 +339,10 @@ export async function runWatchMain(params = {}) {
       watcher.close?.().catch?.(() => {});
       resolve(code);
     };
+
+    if (childInspectArg) {
+      childEnv[WATCH_RUNNER_CHILD_INSPECT_ENV_KEY] = childInspectArg;
+    }
 
     const startRunner = () => {
       watchProcess = deps.spawn(deps.process.execPath, buildRunnerArgs(deps.args), {

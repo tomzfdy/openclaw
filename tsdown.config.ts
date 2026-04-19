@@ -81,11 +81,13 @@ function buildInputOptions(options: InputOptionsArg): InputOptionsReturn {
 }
 
 function nodeBuildConfig(config: UserConfig): UserConfig {
+  const shouldEmitSourceMap = process.env.OPENCLAW_BUILD_SOURCEMAP === "1";
   return {
     ...config,
     env,
     fixedExtension: false,
     platform: "node",
+    sourcemap: shouldEmitSourceMap,
     inputOptions: buildInputOptions,
   };
 }

@@ -13,6 +13,8 @@ import { runRuntimePostBuild } from "./runtime-postbuild.mjs";
 
 const buildScript = "scripts/tsdown-build.mjs";
 const compilerArgs = [buildScript, "--no-clean"];
+const RUNNER_CHILD_INSPECT_ENV_KEY = "OPENCLAW_CHILD_INSPECT";
+const ALLOW_RUNTIME_POSTBUILD_FAILURE_ENV_KEY = "OPENCLAW_ALLOW_RUNTIME_POSTBUILD_FAILURE";
 
 const runNodeSourceRoots = ["src", BUNDLED_PLUGIN_ROOT_DIR];
 const runNodeConfigFiles = ["tsconfig.json", "package.json", "tsdown.config.ts"];
@@ -276,6 +278,20 @@ const logRunner = (message, deps) => {
   deps.stderr.write(`[openclaw] ${message}\n`);
 };
 
+const parseRunnerChildInspectArg = (rawValue) => {
+  const value = String(rawValue ?? "").trim();
+  if (!value) {
+    return null;
+  }
+  if (/^\d+$/.test(value)) {
+    return `--inspect=${value}`;
+  }
+  if (/^--inspect(?:-brk)?(?:=.*)?$/.test(value)) {
+    return value;
+  }
+  return null;
+};
+
 const waitForSpawnedProcess = async (childProcess, deps) => {
   let forwardedSignal = null;
   let onSigInt;
@@ -324,11 +340,23 @@ const waitForSpawnedProcess = async (childProcess, deps) => {
 };
 
 const runOpenClaw = async (deps) => {
-  const nodeProcess = deps.spawn(deps.execPath, ["openclaw.mjs", ...deps.args], {
+  const childInspectArg = parseRunnerChildInspectArg(deps.env[RUNNER_CHILD_INSPECT_ENV_KEY]);
+  if (deps.env[RUNNER_CHILD_INSPECT_ENV_KEY] && !childInspectArg) {
+    logRunner(
+      `Ignoring ${RUNNER_CHILD_INSPECT_ENV_KEY} value \"${deps.env[RUNNER_CHILD_INSPECT_ENV_KEY]}\" (expected a port or --inspect/--inspect-brk flag).`,
+      deps,
+    );
+  }
+
+  const nodeProcess = deps.spawn(
+    deps.execPath,
+    [...(childInspectArg ? [childInspectArg] : []), "openclaw.mjs", ...deps.args],
+    {
     cwd: deps.cwd,
     env: deps.env,
     stdio: "inherit",
-  });
+    },
+  );
   const res = await waitForSpawnedProcess(nodeProcess, deps);
   if (res.exitSignal) {
     return getSignalExitCode(res.exitSignal);
@@ -351,6 +379,9 @@ const syncRuntimeArtifacts = (deps) => {
   }
   return true;
 };
+
+const shouldAllowRuntimePostBuildFailure = (deps) =>
+  deps.env[ALLOW_RUNTIME_POSTBUILD_FAILURE_ENV_KEY] === "1";
 
 const writeBuildStamp = (deps) => {
   try {
@@ -393,7 +424,11 @@ export async function runNodeMain(params = {}) {
   const buildRequirement = resolveBuildRequirement(deps);
   if (!buildRequirement.shouldBuild) {
     if (!shouldSkipCleanWatchRuntimeSync(deps) && !syncRuntimeArtifacts(deps)) {
-      return 1;
+      if (shouldAllowRuntimePostBuildFailure(deps)) {
+        logRunner("Continuing despite runtime postbuild failure.", deps);
+      } else {
+        return 1;
+      }
     }
     return await runOpenClaw(deps);
   }
@@ -421,7 +456,11 @@ export async function runNodeMain(params = {}) {
     return buildRes.exitCode;
   }
   if (!syncRuntimeArtifacts(deps)) {
-    return 1;
+    if (shouldAllowRuntimePostBuildFailure(deps)) {
+      logRunner("Continuing despite runtime postbuild failure.", deps);
+    } else {
+      return 1;
+    }
   }
   writeBuildStamp(deps);
   return await runOpenClaw(deps);

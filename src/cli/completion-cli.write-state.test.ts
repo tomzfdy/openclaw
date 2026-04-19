@@ -4,26 +4,14 @@ import path from "node:path";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const stderrWrites = vi.hoisted(() => vi.fn());
-const getCoreCliCommandNamesMock = vi.hoisted(() => vi.fn(() => []));
-const registerCoreCliByNameMock = vi.hoisted(() => vi.fn());
-const getProgramContextMock = vi.hoisted(() => vi.fn(() => null));
-const getSubCliEntriesMock = vi.hoisted(() =>
-  vi.fn(() => [
-    { name: "qa", description: "QA commands", hasSubcommands: true },
-    { name: "completion", description: "Completion", hasSubcommands: false },
-  ]),
-);
-const registerSubCliByNameMock = vi.hoisted(() =>
-  vi.fn(async (program: Command, name: string) => {
-    if (name === "qa") {
-      throw new Error("qa scenario pack not found: qa/scenarios/index.md");
-    }
+const getCoreCliCommandNamesMock = vi.hoisted(() => vi.fn(() => ["setup", "sessions", "tasks"]));
+const registerCoreCliByNameMock = vi.hoisted(() =>
+  vi.fn(async (program: Command, _ctx: unknown, name: string) => {
     program.command(name);
     return true;
   }),
 );
-const registerPluginCliCommandsFromValidatedConfigMock = vi.hoisted(() => vi.fn(async () => null));
+const getProgramContextMock = vi.hoisted(() => vi.fn(() => ({ fake: true })));
 
 vi.mock("./program/command-registry-core.js", () => ({
   getCoreCliCommandNames: getCoreCliCommandNamesMock,
@@ -34,39 +22,17 @@ vi.mock("./program/program-context.js", () => ({
   getProgramContext: getProgramContextMock,
 }));
 
-vi.mock("./program/register.subclis-core.js", () => ({
-  getSubCliEntries: getSubCliEntriesMock,
-  registerSubCliByName: registerSubCliByNameMock,
-}));
-
-vi.mock("../plugins/cli.js", () => ({
-  registerPluginCliCommandsFromValidatedConfig: registerPluginCliCommandsFromValidatedConfigMock,
-}));
-
 describe("completion-cli write-state", () => {
   const originalHome = process.env.HOME;
   const originalStateDir = process.env.OPENCLAW_STATE_DIR;
-  let restoreStderrWriteSpy: (() => void) | null = null;
 
   beforeEach(() => {
-    stderrWrites.mockReset();
     getCoreCliCommandNamesMock.mockClear();
     registerCoreCliByNameMock.mockClear();
     getProgramContextMock.mockClear();
-    getSubCliEntriesMock.mockClear();
-    registerSubCliByNameMock.mockClear();
-    registerPluginCliCommandsFromValidatedConfigMock.mockClear();
-    const stderrWriteSpy = vi.spyOn(process.stderr, "write").mockImplementation(((
-      chunk: string | Uint8Array,
-    ) => {
-      stderrWrites(chunk.toString());
-      return true;
-    }) as typeof process.stderr.write);
-    restoreStderrWriteSpy = () => stderrWriteSpy.mockRestore();
   });
 
   afterEach(async () => {
-    restoreStderrWriteSpy?.();
     if (originalHome === undefined) {
       delete process.env.HOME;
     } else {
@@ -79,7 +45,7 @@ describe("completion-cli write-state", () => {
     }
   });
 
-  it("keeps completion cache generation alive when a subcli fails to register", async () => {
+  it("writes completion cache from the reduced core command tree", async () => {
     const { registerCompletionCli } = await import("./completion-cli.js");
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-completion-state-"));
     const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-completion-home-"));
@@ -97,11 +63,9 @@ describe("completion-cli write-state", () => {
     expect(await fs.readdir(cacheDir)).toEqual(
       expect.arrayContaining(["openclaw.bash", "openclaw.fish", "openclaw.ps1", "openclaw.zsh"]),
     );
-    expect(registerSubCliByNameMock).toHaveBeenCalledWith(program, "qa");
-    expect(registerPluginCliCommandsFromValidatedConfigMock).toHaveBeenCalledTimes(1);
-    expect(stderrWrites).toHaveBeenCalledWith(
-      expect.stringContaining("skipping subcommand `qa` while building completion cache"),
-    );
+    expect(registerCoreCliByNameMock).toHaveBeenCalledWith(program, { fake: true }, "setup");
+    expect(registerCoreCliByNameMock).toHaveBeenCalledWith(program, { fake: true }, "sessions");
+    expect(registerCoreCliByNameMock).toHaveBeenCalledWith(program, { fake: true }, "tasks");
 
     await fs.rm(stateDir, { recursive: true, force: true });
     await fs.rm(homeDir, { recursive: true, force: true });

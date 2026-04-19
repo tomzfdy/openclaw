@@ -10,10 +10,6 @@ import {
   resolveCliExecutionStartupContext,
 } from "../command-execution-startup.js";
 import { shouldBypassConfigGuardForCommandPath } from "../command-startup-policy.js";
-import {
-  resolvePluginInstallInvalidConfigPolicy,
-  resolvePluginInstallPreactionRequest,
-} from "../plugin-install-config-policy.js";
 import { isCommandJsonOutputMode } from "./json-mode.js";
 
 function setProcessTitleForCommand(actionCommand: Command) {
@@ -27,18 +23,6 @@ function setProcessTitleForCommand(actionCommand: Command) {
     return;
   }
   process.title = `${cliName}-${name}`;
-}
-
-function shouldAllowInvalidConfigForAction(actionCommand: Command, commandPath: string[]): boolean {
-  return (
-    resolvePluginInstallInvalidConfigPolicy(
-      resolvePluginInstallPreactionRequest({
-        actionCommand,
-        commandPath,
-        argv: process.argv,
-      }),
-    ) === "allow-bundled-recovery"
-  );
 }
 
 function getRootCommand(command: Command): Command {
@@ -94,7 +78,6 @@ export function registerPreActionHooks(program: Command, programVersion: string)
       runtime: defaultRuntime,
       commandPath,
       startupPolicy,
-      allowInvalid: shouldAllowInvalidConfigForAction(actionCommand, commandPath),
     });
   });
 }

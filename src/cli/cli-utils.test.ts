@@ -1,6 +1,4 @@
-import { Command } from "commander";
 import { describe, expect, it, vi } from "vitest";
-import { registerDnsCli } from "./dns-cli.js";
 import { parseCanvasSnapshotPayload } from "./nodes-canvas.js";
 import { parseByteSize } from "./parse-bytes.js";
 import { parseDurationMs } from "./parse-duration.js";
@@ -42,22 +40,6 @@ describe("nodes canvas helpers", () => {
     expect(() => parseCanvasSnapshotPayload({ format: "png" })).toThrow(
       /invalid canvas\.snapshot payload/i,
     );
-  });
-});
-
-describe("dns cli", () => {
-  it("prints setup info (no apply)", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
-      const program = new Command();
-      registerDnsCli(program);
-      await program.parseAsync(["dns", "setup", "--domain", "openclaw.internal"], { from: "user" });
-      const output = log.mock.calls.map((call) => call.join(" ")).join("\\n");
-      expect(output).toContain("DNS setup");
-      expect(output).toContain("openclaw.internal");
-    } finally {
-      log.mockRestore();
-    }
   });
 });
 

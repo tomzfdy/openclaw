@@ -15,6 +15,7 @@ const buildScript = "scripts/tsdown-build.mjs";
 const compilerArgs = [buildScript, "--no-clean"];
 const RUNNER_CHILD_INSPECT_ENV_KEY = "OPENCLAW_CHILD_INSPECT";
 const ALLOW_RUNTIME_POSTBUILD_FAILURE_ENV_KEY = "OPENCLAW_ALLOW_RUNTIME_POSTBUILD_FAILURE";
+const RUN_ENTRY_ENV_KEY = "OPENCLAW_RUN_ENTRY";
 
 const runNodeSourceRoots = ["src", BUNDLED_PLUGIN_ROOT_DIR];
 const runNodeConfigFiles = ["tsconfig.json", "package.json", "tsdown.config.ts"];
@@ -278,6 +279,26 @@ const logRunner = (message, deps) => {
   deps.stderr.write(`[openclaw] ${message}\n`);
 };
 
+const normalizeRelativePosixPath = (value) =>
+  String(value ?? "")
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "");
+
+const resolveRunEntry = (env) => {
+  const customDistEntry = normalizeRelativePosixPath(env?.[RUN_ENTRY_ENV_KEY] ?? "");
+  if (customDistEntry) {
+    return {
+      distEntryRelativePath: customDistEntry,
+      execRelativePath: path.posix.join("dist", customDistEntry),
+    };
+  }
+  return {
+    distEntryRelativePath: "entry.js",
+    execRelativePath: "openclaw.mjs",
+  };
+};
+
 const parseRunnerChildInspectArg = (rawValue) => {
   const value = String(rawValue ?? "").trim();
   if (!value) {
@@ -350,11 +371,11 @@ const runOpenClaw = async (deps) => {
 
   const nodeProcess = deps.spawn(
     deps.execPath,
-    [...(childInspectArg ? [childInspectArg] : []), "openclaw.mjs", ...deps.args],
+    [...(childInspectArg ? [childInspectArg] : []), deps.execEntryPath, ...deps.args],
     {
-    cwd: deps.cwd,
-    env: deps.env,
-    stdio: "inherit",
+     cwd: deps.cwd,
+     env: deps.env,
+     stdio: "inherit",
     },
   );
   const res = await waitForSpawnedProcess(nodeProcess, deps);
@@ -413,7 +434,9 @@ export async function runNodeMain(params = {}) {
   };
 
   deps.distRoot = path.join(deps.cwd, "dist");
-  deps.distEntry = path.join(deps.distRoot, "/entry.js");
+  deps.runEntry = resolveRunEntry(deps.env);
+  deps.execEntryPath = path.join(deps.cwd, deps.runEntry.execRelativePath);
+  deps.distEntry = path.join(deps.distRoot, deps.runEntry.distEntryRelativePath);
   deps.buildStampPath = path.join(deps.distRoot, ".buildstamp");
   deps.sourceRoots = runNodeSourceRoots.map((sourceRoot) => ({
     name: sourceRoot,

@@ -49,9 +49,6 @@ vi.mock("./register.subclis.js", () => ({
 
 const testProgramContext: ProgramContext = {
   programVersion: "9.9.9-test",
-  channelOptions: ["telegram"],
-  messageChannelOptions: "telegram",
-  agentChannelOptions: "last|telegram",
 };
 
 describe("configureProgramHelp", () => {

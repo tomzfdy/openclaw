@@ -26,8 +26,6 @@ const programMocks = vi.hoisted(() => {
     setupWizardCommand,
     onboardCommand: setupWizardCommand,
     callGateway: vi.fn(),
-    runChannelLogin: vi.fn(),
-    runChannelLogout: vi.fn(),
     runTui: vi.fn(),
     loadAndMaybeMigrateDoctorConfig: vi.fn(),
     ensureConfigReady: vi.fn(),
@@ -44,8 +42,6 @@ export const setupCommand = programMocks.setupCommand as AnyMock;
 export const onboardCommand = programMocks.onboardCommand as AnyMock;
 export const setupWizardCommand = programMocks.setupWizardCommand as AnyMock;
 export const callGateway = programMocks.callGateway as AnyMock;
-export const runChannelLogin = programMocks.runChannelLogin as AnyMock;
-export const runChannelLogout = programMocks.runChannelLogout as AnyMock;
 export const runTui = programMocks.runTui as AnyMock;
 export const loadAndMaybeMigrateDoctorConfig =
   programMocks.loadAndMaybeMigrateDoctorConfig as AnyMock;
@@ -90,10 +86,6 @@ vi.mock("../commands/onboard.js", () => ({
   setupWizardCommand: programMocks.setupWizardCommand,
 }));
 vi.mock("../runtime.js", () => ({ defaultRuntime: programMocks.runtime }));
-vi.mock("./channel-auth.js", () => ({
-  runChannelLogin: programMocks.runChannelLogin,
-  runChannelLogout: programMocks.runChannelLogout,
-}));
 vi.mock("../tui/tui.js", () => ({ runTui: programMocks.runTui }));
 vi.mock("../gateway/call.js", () => ({
   callGateway: programMocks.callGateway,
@@ -105,9 +97,6 @@ vi.mock("../gateway/call.js", () => ({
   }),
 }));
 vi.mock("./deps.js", () => ({ createDefaultDeps: () => ({}) }));
-vi.mock("./plugin-registry.js", () => ({
-  ensurePluginRegistryLoaded: programMocks.ensurePluginRegistryLoaded,
-}));
 vi.mock("../commands/doctor-config-flow.js", () => ({
   loadAndMaybeMigrateDoctorConfig: programMocks.loadAndMaybeMigrateDoctorConfig,
 }));

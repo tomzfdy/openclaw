@@ -4,7 +4,7 @@ import "./agent-command.test-mocks.js";
 import "../cron/isolated-agent.mocks.js";
 import { __testing as agentCommandTesting } from "../agents/agent-command.js";
 import { resolveSession } from "../agents/command/session.js";
-import * as commandConfigResolutionRuntimeModule from "../cli/command-config-resolution.runtime.js";
+import * as commandConfigResolutionRuntimeModule from "../cli/command-config-resolution.js";
 import * as configIoModule from "../config/io.js";
 import * as runtimeSnapshotModule from "../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";

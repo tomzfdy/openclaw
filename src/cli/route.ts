@@ -12,7 +12,6 @@ import { findRoutedCommand } from "./program/routes.js";
 async function prepareRoutedCommand(params: {
   argv: string[];
   commandPath: string[];
-  loadPlugins?: boolean | ((argv: string[]) => boolean);
 }) {
   const { startupPolicy } = resolveCliExecutionStartupContext({
     argv: params.argv,
@@ -28,13 +27,10 @@ async function prepareRoutedCommand(params: {
     showBanner: process.stdout.isTTY && !startupPolicy.suppressDoctorStdout,
     version: VERSION,
   });
-  const shouldLoadPlugins =
-    typeof params.loadPlugins === "function" ? params.loadPlugins(params.argv) : params.loadPlugins;
   await ensureCliExecutionBootstrap({
     runtime: defaultRuntime,
     commandPath: params.commandPath,
     startupPolicy,
-    loadPlugins: shouldLoadPlugins ?? startupPolicy.loadPlugins,
   });
 }
 
@@ -56,7 +52,6 @@ export async function tryRouteCli(argv: string[]): Promise<boolean> {
   await prepareRoutedCommand({
     argv,
     commandPath: invocation.commandPath,
-    loadPlugins: route.loadPlugins,
   });
   return route.run(argv);
 }

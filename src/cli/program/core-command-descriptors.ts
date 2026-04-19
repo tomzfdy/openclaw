@@ -10,32 +10,6 @@ const coreCliCommandCatalog = defineCommandDescriptorCatalog([
     hasSubcommands: false,
   },
   {
-    name: "onboard",
-    description: "Interactive onboarding for gateway, workspace, and skills",
-    hasSubcommands: false,
-  },
-  {
-    name: "configure",
-    description: "Interactive configuration for credentials, channels, gateway, and agent defaults",
-    hasSubcommands: false,
-  },
-  {
-    name: "config",
-    description:
-      "Non-interactive config helpers (get/set/unset/file/validate). Default: starts guided setup.",
-    hasSubcommands: true,
-  },
-  {
-    name: "backup",
-    description: "Create and verify local backup archives for OpenClaw state",
-    hasSubcommands: true,
-  },
-  {
-    name: "doctor",
-    description: "Health checks + quick fixes for the gateway and channels",
-    hasSubcommands: false,
-  },
-  {
     name: "dashboard",
     description: "Open the Control UI with your current token",
     hasSubcommands: false,
@@ -48,36 +22,6 @@ const coreCliCommandCatalog = defineCommandDescriptorCatalog([
   {
     name: "uninstall",
     description: "Uninstall the gateway service + local data (CLI remains)",
-    hasSubcommands: false,
-  },
-  {
-    name: "message",
-    description: "Send, read, and manage messages",
-    hasSubcommands: true,
-  },
-  {
-    name: "mcp",
-    description: "Manage OpenClaw MCP config and channel bridge",
-    hasSubcommands: true,
-  },
-  {
-    name: "agent",
-    description: "Run one agent turn via the Gateway",
-    hasSubcommands: false,
-  },
-  {
-    name: "agents",
-    description: "Manage isolated agents (workspaces, auth, routing)",
-    hasSubcommands: true,
-  },
-  {
-    name: "status",
-    description: "Show channel health and recent session recipients",
-    hasSubcommands: false,
-  },
-  {
-    name: "health",
-    description: "Fetch health from the running gateway",
     hasSubcommands: false,
   },
   {

@@ -74,7 +74,7 @@ vi.mock("./root-help-metadata.js", () => ({
   outputPrecomputedRootHelpText: outputPrecomputedRootHelpTextMock,
 }));
 
-vi.mock("./program.js", () => ({
+vi.mock("./program/build-program.js", () => ({
   buildProgram: buildProgramMock,
 }));
 

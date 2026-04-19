@@ -44,8 +44,7 @@ describe("command-execution-startup", () => {
       startupPolicy: {
         suppressDoctorStdout: true,
         hideBanner: false,
-        skipConfigGuard: true,
-        loadPlugins: false,
+        skipConfigGuard: false,
       },
     });
   });
@@ -56,7 +55,6 @@ describe("command-execution-startup", () => {
         suppressDoctorStdout: true,
         hideBanner: false,
         skipConfigGuard: false,
-        loadPlugins: true,
       },
       version: "1.2.3",
       argv: ["node", "openclaw", "status"],
@@ -72,7 +70,6 @@ describe("command-execution-startup", () => {
         suppressDoctorStdout: false,
         hideBanner: true,
         skipConfigGuard: false,
-        loadPlugins: true,
       },
       version: "1.2.3",
       showBanner: true,
@@ -90,7 +87,6 @@ describe("command-execution-startup", () => {
         suppressDoctorStdout: true,
         hideBanner: false,
         skipConfigGuard: true,
-        loadPlugins: false,
       },
     });
 
@@ -99,7 +95,6 @@ describe("command-execution-startup", () => {
       commandPath: ["status"],
       suppressDoctorStdout: true,
       allowInvalid: undefined,
-      loadPlugins: false,
       skipConfigGuard: true,
     });
 
@@ -111,10 +106,8 @@ describe("command-execution-startup", () => {
         suppressDoctorStdout: false,
         hideBanner: false,
         skipConfigGuard: false,
-        loadPlugins: false,
       },
       allowInvalid: true,
-      loadPlugins: true,
     });
 
     expect(ensureCliCommandBootstrapMock).toHaveBeenLastCalledWith({
@@ -122,7 +115,6 @@ describe("command-execution-startup", () => {
       commandPath: ["message", "send"],
       suppressDoctorStdout: false,
       allowInvalid: true,
-      loadPlugins: true,
       skipConfigGuard: false,
     });
   });

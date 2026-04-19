@@ -2,43 +2,15 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerSubCliByName, registerSubCliCommands } from "./register.subclis.js";
 
-const { acpAction, registerAcpCli } = vi.hoisted(() => {
+const { completionAction, registerCompletionCli } = vi.hoisted(() => {
   const action = vi.fn();
   const register = vi.fn((program: Command) => {
-    program.command("acp").action(action);
+    program.command("completion").action(action);
   });
-  return { acpAction: action, registerAcpCli: register };
+  return { completionAction: action, registerCompletionCli: register };
 });
 
-const { nodesAction, registerNodesCli } = vi.hoisted(() => {
-  const action = vi.fn();
-  const register = vi.fn((program: Command) => {
-    const nodes = program.command("nodes");
-    nodes.command("list").action(action);
-  });
-  return { nodesAction: action, registerNodesCli: register };
-});
-
-const { isQaLabCliAvailable, registerQaLabCli } = vi.hoisted(() => ({
-  isQaLabCliAvailable: vi.fn(() => true),
-  registerQaLabCli: vi.fn((program: Command) => {
-    const qa = program.command("qa");
-    qa.command("run").action(() => undefined);
-  }),
-}));
-
-const { inferAction, registerCapabilityCli } = vi.hoisted(() => {
-  const action = vi.fn();
-  const register = vi.fn((program: Command) => {
-    program.command("infer").alias("capability").action(action);
-  });
-  return { inferAction: action, registerCapabilityCli: register };
-});
-
-vi.mock("../acp-cli.js", () => ({ registerAcpCli }));
-vi.mock("../nodes-cli.js", () => ({ registerNodesCli }));
-vi.mock("../capability-cli.js", () => ({ registerCapabilityCli }));
-vi.mock("../../plugin-sdk/qa-lab.js", () => ({ isQaLabCliAvailable, registerQaLabCli }));
+vi.mock("../completion-cli.js", () => ({ registerCompletionCli }));
 
 describe("registerSubCliCommands", () => {
   const originalArgv = process.argv;
@@ -60,14 +32,8 @@ describe("registerSubCliCommands", () => {
     } else {
       process.env.OPENCLAW_DISABLE_LAZY_SUBCOMMANDS = originalDisableLazySubcommands;
     }
-    registerAcpCli.mockClear();
-    acpAction.mockClear();
-    registerNodesCli.mockClear();
-    nodesAction.mockClear();
-    isQaLabCliAvailable.mockReset().mockReturnValue(true);
-    registerQaLabCli.mockClear();
-    registerCapabilityCli.mockClear();
-    inferAction.mockClear();
+    registerCompletionCli.mockClear();
+    completionAction.mockClear();
   });
 
   afterEach(() => {
@@ -79,68 +45,33 @@ describe("registerSubCliCommands", () => {
     }
   });
 
-  it("registers the primary placeholder plus completion and dispatches", async () => {
-    const program = createRegisteredProgram(["node", "openclaw", "acp"]);
-
-    expect(program.commands.map((cmd) => cmd.name())).toEqual(["acp", "completion"]);
-
-    await program.parseAsync(["acp"], { from: "user" });
-
-    expect(registerAcpCli).toHaveBeenCalledTimes(1);
-    expect(acpAction).toHaveBeenCalledTimes(1);
-  });
-
-  it("registers placeholders for all subcommands when no primary", () => {
+  it("registers only the completion placeholder when no primary is provided", () => {
     const program = createRegisteredProgram(["node", "openclaw"]);
 
-    const names = program.commands.map((cmd) => cmd.name());
-    expect(names).toContain("acp");
-    expect(names).toContain("gateway");
-    expect(names).toContain("clawbot");
-    expect(names).toContain("qa");
-    expect(registerAcpCli).not.toHaveBeenCalled();
+    expect(program.commands.map((cmd) => cmd.name())).toEqual(["completion"]);
   });
 
-  it("omits the qa placeholder when the private qa bundle is unavailable", () => {
-    isQaLabCliAvailable.mockReturnValue(false);
+  it("registers the primary completion placeholder and dispatches", async () => {
+    const program = createRegisteredProgram(["node", "openclaw", "completion"], "openclaw");
 
-    const program = createRegisteredProgram(["node", "openclaw"]);
+    expect(program.commands.map((cmd) => cmd.name())).toEqual(["completion"]);
 
-    expect(program.commands.map((cmd) => cmd.name())).not.toContain("qa");
-  });
+    await program.parseAsync(["completion"], { from: "user" });
 
-  it("re-parses argv for lazy subcommands", async () => {
-    const program = createRegisteredProgram(["node", "openclaw", "nodes", "list"], "openclaw");
-
-    expect(program.commands.map((cmd) => cmd.name())).toEqual(["nodes", "completion"]);
-
-    await program.parseAsync(["nodes", "list"], { from: "user" });
-
-    expect(registerNodesCli).toHaveBeenCalledTimes(1);
-    expect(nodesAction).toHaveBeenCalledTimes(1);
-  });
-
-  it("registers the infer placeholder and dispatches through the capability registrar", async () => {
-    const program = createRegisteredProgram(["node", "openclaw", "infer"], "openclaw");
-
-    expect(program.commands.map((cmd) => cmd.name())).toEqual(["infer", "completion"]);
-
-    await program.parseAsync(["infer"], { from: "user" });
-
-    expect(registerCapabilityCli).toHaveBeenCalledTimes(1);
-    expect(inferAction).toHaveBeenCalledTimes(1);
+    expect(registerCompletionCli).toHaveBeenCalledTimes(1);
+    expect(completionAction).toHaveBeenCalledTimes(1);
   });
 
   it("replaces placeholder when registering a subcommand by name", async () => {
-    const program = createRegisteredProgram(["node", "openclaw", "acp", "--help"], "openclaw");
+    const program = createRegisteredProgram(["node", "openclaw", "completion", "--help"], "openclaw");
 
-    await registerSubCliByName(program, "acp");
+    await registerSubCliByName(program, "completion");
 
     const names = program.commands.map((cmd) => cmd.name());
-    expect(names.filter((name) => name === "acp")).toHaveLength(1);
+    expect(names.filter((name) => name === "completion")).toHaveLength(1);
 
-    await program.parseAsync(["acp"], { from: "user" });
-    expect(registerAcpCli).toHaveBeenCalledTimes(1);
-    expect(acpAction).toHaveBeenCalledTimes(1);
+    await program.parseAsync(["completion"], { from: "user" });
+    expect(registerCompletionCli).toHaveBeenCalledTimes(1);
+    expect(completionAction).toHaveBeenCalledTimes(1);
   });
 });

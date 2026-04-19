@@ -172,7 +172,7 @@ async function resolveAgentRuntimeConfig(
   })
     ? (
         await (
-          await import("../cli/command-config-resolution.runtime.js")
+          await import("../cli/command-config-resolution.js")
         ).resolveCommandConfigWithSecrets({
           config: loadedRaw,
           commandName: "agent",

@@ -5,7 +5,6 @@ import { matchesCommandPath } from "./command-path-matches.js";
 const DEFAULT_CLI_COMMAND_PATH_POLICY: CliCommandPathPolicy = {
   bypassConfigGuard: false,
   routeConfigGuard: "never",
-  loadPlugins: "never",
   hideBanner: false,
   ensureCliPath: true,
 };

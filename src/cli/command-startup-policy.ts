@@ -16,14 +16,6 @@ export function shouldSkipRouteConfigGuardForCommandPath(params: {
   );
 }
 
-export function shouldLoadPluginsForCommandPath(params: {
-  commandPath: string[];
-  jsonOutputMode: boolean;
-}): boolean {
-  const loadPlugins = resolveCliCommandPathPolicy(params.commandPath).loadPlugins;
-  return loadPlugins === "always" || (loadPlugins === "text-only" && !params.jsonOutputMode);
-}
-
 export function shouldHideCliBannerForCommandPath(
   commandPath: string[],
   env: NodeJS.ProcessEnv = process.env,
@@ -54,9 +46,5 @@ export function resolveCliStartupPolicy(params: {
           suppressDoctorStdout,
         })
       : false,
-    loadPlugins: shouldLoadPluginsForCommandPath({
-      commandPath: params.commandPath,
-      jsonOutputMode: params.jsonOutputMode,
-    }),
   };
 }

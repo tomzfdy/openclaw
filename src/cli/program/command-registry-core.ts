@@ -3,7 +3,6 @@ import { resolveCliArgvInvocation } from "../argv-invocation.js";
 import { shouldRegisterPrimaryCommandOnly } from "../command-registration-policy.js";
 import {
   buildCommandGroupEntries,
-  defineImportedCommandGroupSpec,
   defineImportedProgramCommandGroupSpecs,
   type CommandGroupDescriptorSpec,
 } from "./command-group-descriptors.js";
@@ -57,61 +56,12 @@ const coreEntrySpecs: readonly CommandGroupDescriptorSpec<
         exportName: "registerSetupCommand",
       },
       {
-        commandNames: ["onboard"],
-        loadModule: () => import("./register.onboard.js"),
-        exportName: "registerOnboardCommand",
-      },
-      {
-        commandNames: ["configure"],
-        loadModule: () => import("./register.configure.js"),
-        exportName: "registerConfigureCommand",
-      },
-      {
-        commandNames: ["config"],
-        loadModule: () => import("../config-cli.js"),
-        exportName: "registerConfigCli",
-      },
-      {
-        commandNames: ["backup"],
-        loadModule: () => import("./register.backup.js"),
-        exportName: "registerBackupCommand",
-      },
-      {
-        commandNames: ["doctor", "dashboard", "reset", "uninstall"],
+        commandNames: ["dashboard", "reset", "uninstall"],
         loadModule: () => import("./register.maintenance.js"),
         exportName: "registerMaintenanceCommands",
       },
-    ]),
-  ),
-  defineImportedCommandGroupSpec(
-    ["message"],
-    () => import("./register.message.js"),
-    (mod, { program, ctx }) => {
-      mod.registerMessageCommands(program, ctx);
-    },
-  ),
-  ...withProgramOnlySpecs(
-    defineImportedProgramCommandGroupSpecs([
       {
-        commandNames: ["mcp"],
-        loadModule: () => import("../mcp-cli.js"),
-        exportName: "registerMcpCli",
-      },
-    ]),
-  ),
-  defineImportedCommandGroupSpec(
-    ["agent", "agents"],
-    () => import("./register.agent.js"),
-    (mod, { program, ctx }) => {
-      mod.registerAgentCommands(program, {
-        agentChannelOptions: ctx.agentChannelOptions,
-      });
-    },
-  ),
-  ...withProgramOnlySpecs(
-    defineImportedProgramCommandGroupSpecs([
-      {
-        commandNames: ["status", "health", "sessions", "tasks"],
+        commandNames: ["sessions", "tasks"],
         loadModule: () => import("./register.status-health-sessions.js"),
         exportName: "registerStatusHealthSessionsCommands",
       },

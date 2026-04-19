@@ -4,7 +4,6 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { CommanderError } from "commander";
 import { resolveStateDir } from "../config/paths.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeEnv } from "../infra/env.js";
 import { formatUncaughtError } from "../infra/errors.js";
 import { isMainModule } from "../infra/is-main.js";
@@ -12,41 +11,19 @@ import { ensureGlobalUndiciEnvProxyDispatcher } from "../infra/net/undici-global
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import { assertSupportedRuntime } from "../infra/runtime-guard.js";
 import { enableConsoleCapture } from "../logging.js";
-import type { PluginManifestCommandAliasRegistry } from "../plugins/manifest-command-aliases.js";
-import { resolveManifestCommandAliasOwner } from "../plugins/manifest-command-aliases.runtime.js";
-import { hasMemoryRuntime } from "../plugins/memory-state.js";
 import { maybeWarnAboutDebugProxyCoverage } from "../proxy-capture/coverage.js";
 import {
   finalizeDebugProxyCapture,
   initializeDebugProxyCapture,
 } from "../proxy-capture/runtime.js";
-import {
-  normalizeLowercaseStringOrEmpty,
-  normalizeOptionalLowercaseString,
-  normalizeOptionalString,
-} from "../shared/string-coerce.js";
+import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { resolveCliArgvInvocation } from "./argv-invocation.js";
-import {
-  shouldRegisterPrimaryCommandOnly,
-  shouldSkipPluginCommandRegistration,
-} from "./command-registration-policy.js";
+import { shouldRegisterPrimaryCommandOnly } from "./command-registration-policy.js";
 import { shouldEnsureCliPathForCommandPath } from "./command-startup-policy.js";
 import { maybeRunCliInContainer, parseCliContainerArgs } from "./container-target.js";
 import { applyCliProfileEnv, parseCliProfileArgs } from "./profile.js";
 import { tryRouteCli } from "./route.js";
 import { normalizeWindowsArgv } from "./windows-argv.js";
-
-async function closeCliMemoryManagers(): Promise<void> {
-  if (!hasMemoryRuntime()) {
-    return;
-  }
-  try {
-    const { closeActiveMemorySearchManagers } = await import("../plugins/memory-runtime.js");
-    await closeActiveMemorySearchManagers();
-  } catch {
-    // Best-effort teardown for short-lived CLI processes.
-  }
-}
 
 export function rewriteUpdateFlagArgv(argv: string[]): string[] {
   const index = argv.indexOf("--update");
@@ -69,75 +46,6 @@ export function shouldEnsureCliPath(argv: string[]): boolean {
 
 export function shouldUseRootHelpFastPath(argv: string[]): boolean {
   return resolveCliArgvInvocation(argv).isRootHelpInvocation;
-}
-
-export function resolveMissingPluginCommandMessage(
-  pluginId: string,
-  config?: OpenClawConfig,
-  options?: { registry?: PluginManifestCommandAliasRegistry },
-): string | null {
-  const normalizedPluginId = normalizeLowercaseStringOrEmpty(pluginId);
-  if (!normalizedPluginId) {
-    return null;
-  }
-  const allow =
-    Array.isArray(config?.plugins?.allow) && config.plugins.allow.length > 0
-      ? config.plugins.allow
-          .filter((entry): entry is string => typeof entry === "string")
-          .map((entry) => normalizeOptionalLowercaseString(entry))
-          .filter(Boolean)
-      : [];
-  const commandAlias = resolveManifestCommandAliasOwner({
-    command: normalizedPluginId,
-    config,
-    registry: options?.registry,
-  });
-  const parentPluginId = commandAlias?.pluginId;
-  if (parentPluginId) {
-    if (allow.length > 0 && !allow.includes(parentPluginId)) {
-      return (
-        `"${normalizedPluginId}" is not a plugin; it is a command provided by the ` +
-        `"${parentPluginId}" plugin. Add "${parentPluginId}" to \`plugins.allow\` ` +
-        `instead of "${normalizedPluginId}".`
-      );
-    }
-    if (config?.plugins?.entries?.[parentPluginId]?.enabled === false) {
-      return (
-        `The \`openclaw ${normalizedPluginId}\` command is unavailable because ` +
-        `\`plugins.entries.${parentPluginId}.enabled=false\`. Re-enable that entry if you want ` +
-        "the bundled plugin command surface."
-      );
-    }
-    if (commandAlias.kind === "runtime-slash") {
-      const cliHint = commandAlias.cliCommand
-        ? `Use \`openclaw ${commandAlias.cliCommand}\` for related CLI operations, or `
-        : "Use ";
-      return (
-        `"${normalizedPluginId}" is a runtime slash command (/${normalizedPluginId}), not a CLI command. ` +
-        `It is provided by the "${parentPluginId}" plugin. ` +
-        `${cliHint}\`/${normalizedPluginId}\` in a chat session.`
-      );
-    }
-  }
-
-  if (allow.length > 0 && !allow.includes(normalizedPluginId)) {
-    if (parentPluginId && allow.includes(parentPluginId)) {
-      return null;
-    }
-    return (
-      `The \`openclaw ${normalizedPluginId}\` command is unavailable because ` +
-      `\`plugins.allow\` excludes "${normalizedPluginId}". Add "${normalizedPluginId}" to ` +
-      `\`plugins.allow\` if you want that bundled plugin CLI surface.`
-    );
-  }
-  if (config?.plugins?.entries?.[normalizedPluginId]?.enabled === false) {
-    return (
-      `The \`openclaw ${normalizedPluginId}\` command is unavailable because ` +
-      `\`plugins.entries.${normalizedPluginId}.enabled=false\`. Re-enable that entry if you want ` +
-      "the bundled plugin CLI surface."
-    );
-  }
-  return null;
 }
 
 function shouldLoadCliDotEnv(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -212,7 +120,7 @@ export async function runCli(argv: string[] = process.argv) {
 
     const [{ buildProgram }, { installUnhandledRejectionHandler }, { restoreTerminalState }] =
       await Promise.all([
-        import("./program.js"),
+        import("./program/build-program.js"),
         import("../infra/unhandled-rejections.js"),
         import("../terminal/restore.js"),
       ]);
@@ -244,35 +152,6 @@ export async function runCli(argv: string[] = process.argv) {
       await registerSubCliByName(program, primary);
     }
 
-    const hasBuiltinPrimary =
-      primary !== null && program.commands.some((command) => command.name() === primary);
-    const shouldSkipPluginRegistration = shouldSkipPluginCommandRegistration({
-      argv: parseArgv,
-      primary,
-      hasBuiltinPrimary,
-    });
-    if (!shouldSkipPluginRegistration) {
-      // Register plugin CLI commands before parsing
-      const { registerPluginCliCommandsFromValidatedConfig } = await import("../plugins/cli.js");
-      const config = await registerPluginCliCommandsFromValidatedConfig(
-        program,
-        undefined,
-        undefined,
-        {
-          mode: "lazy",
-          primary,
-        },
-      );
-      if (config) {
-        if (primary && !program.commands.some((command) => command.name() === primary)) {
-          const missingPluginCommandMessage = resolveMissingPluginCommandMessage(primary, config);
-          if (missingPluginCommandMessage) {
-            throw new Error(missingPluginCommandMessage);
-          }
-        }
-      }
-    }
-
     try {
       await program.parseAsync(parseArgv);
     } catch (error) {
@@ -282,7 +161,6 @@ export async function runCli(argv: string[] = process.argv) {
       process.exitCode = error.exitCode;
     }
   } finally {
-    await closeCliMemoryManagers();
   }
 }
 

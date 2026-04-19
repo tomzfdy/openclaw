@@ -15,10 +15,6 @@ import {
   type CommandGroupEntry,
 } from "./register-command-groups.js";
 import {
-  registerSubCliByName as registerSubCliByNameCore,
-  registerSubCliCommands as registerSubCliCommandsCore,
-} from "./register.subclis-core.js";
-import {
   getSubCliCommandsWithSubcommands,
   getSubCliEntries as getSubCliEntryDescriptors,
   type SubCliDescriptor,
@@ -47,14 +43,10 @@ export function getSubCliEntries(): ReadonlyArray<SubCliDescriptor> {
 }
 
 export async function registerSubCliByName(program: Command, name: string): Promise<boolean> {
-  if (await registerSubCliByNameCore(program, name)) {
-    return true;
-  }
   return registerCommandGroupByName(program, resolveSubCliCommandGroups(), name);
 }
 
 export function registerSubCliCommands(program: Command, argv: string[] = process.argv) {
-  registerSubCliCommandsCore(program, argv);
   const { primary } = resolveCliArgvInvocation(argv);
   registerCommandGroups(program, resolveSubCliCommandGroups(), {
     eager: shouldEagerRegisterSubcommands(),

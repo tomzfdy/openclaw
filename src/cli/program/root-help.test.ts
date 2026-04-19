@@ -1,21 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderRootHelpText } from "./root-help.js";
 
-const getPluginCliCommandDescriptorsMock = vi.fn(
-  async (_config?: unknown, _env?: unknown, _loaderOptions?: unknown) => [
-    {
-      name: "matrix",
-      description: "Matrix channel utilities",
-      hasSubcommands: true,
-    },
-  ],
-);
-
 vi.mock("./core-command-descriptors.js", () => ({
   getCoreCliCommandDescriptors: () => [
     {
-      name: "status",
-      description: "Show status",
+      name: "sessions",
+      description: "List sessions",
       hasSubcommands: false,
     },
   ],
@@ -25,43 +15,20 @@ vi.mock("./core-command-descriptors.js", () => ({
 vi.mock("./subcli-descriptors.js", () => ({
   getSubCliEntries: () => [
     {
-      name: "config",
-      description: "Manage config",
-      hasSubcommands: true,
+      name: "completion",
+      description: "Generate completion",
+      hasSubcommands: false,
     },
   ],
-  getSubCliCommandsWithSubcommands: () => ["config"],
-}));
-
-vi.mock("../../plugins/cli.js", () => ({
-  getPluginCliCommandDescriptors: (...args: [unknown?, unknown?, unknown?]) =>
-    getPluginCliCommandDescriptorsMock(...args),
+  getSubCliCommandsWithSubcommands: () => [],
 }));
 
 describe("root help", () => {
-  it("passes isolated config and env through to plugin CLI descriptor loading", async () => {
-    const config = {
-      agents: {
-        defaults: {
-          workspace: "/tmp/openclaw-root-help-workspace",
-        },
-      },
-    };
-    const env = { OPENCLAW_STATE_DIR: "/tmp/openclaw-root-help-state" } as NodeJS.ProcessEnv;
-
-    await renderRootHelpText({ config, env, pluginSdkResolution: "src" });
-
-    expect(getPluginCliCommandDescriptorsMock).toHaveBeenCalledWith(config, env, {
-      pluginSdkResolution: "src",
-    });
-  });
-
-  it("includes plugin CLI descriptors alongside core and sub-CLI commands", async () => {
+  it("includes only core and reduced sub-CLI commands", async () => {
     const text = await renderRootHelpText();
 
-    expect(text).toContain("status");
-    expect(text).toContain("config");
-    expect(text).toContain("matrix");
-    expect(text).toContain("Matrix channel utilities");
+    expect(text).toContain("sessions");
+    expect(text).toContain("completion");
+    expect(text).not.toContain("matrix");
   });
 });

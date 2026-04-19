@@ -53,9 +53,6 @@ describe("buildProgram", () => {
     mockProcessOutput();
     createProgramContextMock.mockReturnValue({
       programVersion: "9.9.9-test",
-      channelOptions: ["telegram"],
-      messageChannelOptions: "telegram",
-      agentChannelOptions: "last|telegram",
     } satisfies ProgramContext);
   });
 

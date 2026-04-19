@@ -1,5 +1,6 @@
 import { hasPotentialConfiguredChannels } from "../channels/config-presence.js";
-import { ensureCliPluginRegistryLoaded } from "../cli/plugin-registry-loader.js";
+import { loggingState } from "../logging/state.js";
+import { ensurePluginRegistryLoaded } from "../plugins/runtime/runtime-registry-loader.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { executeStatusScanFromOverview } from "./status.scan-execute.ts";
 import {
@@ -36,12 +37,17 @@ export async function scanStatusJsonWithPolicy(
     includeChannelsData: false,
   });
   if (overview.hasConfiguredChannels) {
-    await ensureCliPluginRegistryLoaded({
-      scope: "configured-channels",
-      routeLogsToStderr: true,
-      config: overview.cfg,
-      activationSourceConfig: overview.sourceConfig,
-    });
+    const previousForceStderr = loggingState.forceConsoleToStderr;
+    loggingState.forceConsoleToStderr = true;
+    try {
+      ensurePluginRegistryLoaded({
+        scope: "configured-channels",
+        config: overview.cfg,
+        activationSourceConfig: overview.sourceConfig,
+      });
+    } finally {
+      loggingState.forceConsoleToStderr = previousForceStderr;
+    }
   }
 
   return await executeStatusScanFromOverview({

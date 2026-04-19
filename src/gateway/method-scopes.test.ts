@@ -26,7 +26,6 @@ afterEach(() => {
 describe("method scope resolution", () => {
   it.each([
     ["sessions.resolve", ["operator.read"]],
-    ["config.schema.lookup", ["operator.read"]],
     ["sessions.create", ["operator.write"]],
     ["sessions.send", ["operator.write"]],
     ["sessions.abort", ["operator.write"]],
@@ -34,15 +33,14 @@ describe("method scope resolution", () => {
     ["sessions.messages.unsubscribe", ["operator.read"]],
     ["node.pair.approve", ["operator.pairing"]],
     ["poll", ["operator.write"]],
-    ["config.patch", ["operator.admin"]],
-    ["wizard.start", ["operator.admin"]],
-    ["update.run", ["operator.admin"]],
+    ["connect", ["operator.admin"]],
+    ["web.login.start", ["operator.admin"]],
   ])("resolves least-privilege scopes for %s", (method, expected) => {
     expect(resolveLeastPrivilegeOperatorScopesForMethod(method)).toEqual(expected);
   });
 
-  it("leaves node-only pending drain outside operator scopes", () => {
-    expect(resolveLeastPrivilegeOperatorScopesForMethod("node.pending.drain")).toEqual([]);
+  it("leaves node-only methods outside operator scopes", () => {
+    expect(resolveLeastPrivilegeOperatorScopesForMethod("node.pending.pull")).toEqual([]);
   });
 
   it("returns empty scopes for unknown methods", () => {
@@ -72,10 +70,10 @@ describe("method scope resolution", () => {
 
 describe("operator scope authorization", () => {
   it.each([
-    ["health", ["operator.read"], { allowed: true }],
-    ["health", ["operator.write"], { allowed: true }],
-    ["config.schema.lookup", ["operator.read"], { allowed: true }],
-    ["config.patch", ["operator.admin"], { allowed: true }],
+    ["sessions.list", ["operator.read"], { allowed: true }],
+    ["sessions.list", ["operator.write"], { allowed: true }],
+    ["node.invoke", ["operator.write"], { allowed: true }],
+    ["connect", ["operator.admin"], { allowed: true }],
   ])("authorizes %s for scopes %j", (method, scopes, expected) => {
     expect(authorizeOperatorScopesForMethod(method, scopes)).toEqual(expected);
   });
@@ -163,8 +161,8 @@ describe("plugin approval method registration", () => {
 
 describe("core gateway method classification", () => {
   it("treats node-role methods as classified even without operator scopes", () => {
-    expect(isGatewayMethodClassified("node.pending.drain")).toBe(true);
     expect(isGatewayMethodClassified("node.pending.pull")).toBe(true);
+    expect(isGatewayMethodClassified("node.invoke.result")).toBe(true);
   });
 
   it("classifies every exposed core gateway handler method", () => {

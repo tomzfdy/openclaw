@@ -35,13 +35,14 @@ import {
 import { isLikelyContextOverflowError } from "./pi-embedded-helpers/errors.js";
 import type { FailoverReason } from "./pi-embedded-helpers/types.js";
 
+// 日志子系统：模型回退相关日志
 const log = createSubsystemLogger("model-fallback");
 
 /**
- * Structured error thrown when all model fallback candidates have been
- * exhausted. Carries per-attempt details so callers can build informative
- * user-facing messages (e.g. "rate-limited, retry in 30 s").
+ * 所有模型回退候选都失败时抛出的结构化错误。
+ * attempts 记录每次尝试的详细信息，便于构建用户友好提示。
  */
+// 模型回退失败异常，包含所有尝试详情和最早冷却到期时间
 export class FallbackSummaryError extends Error {
   readonly attempts: FallbackAttempt[];
   readonly soonestCooldownExpiry: number | null;
@@ -59,14 +60,17 @@ export class FallbackSummaryError extends Error {
   }
 }
 
+// 判断错误对象是否为 FallbackSummaryError
 export function isFallbackSummaryError(err: unknown): err is FallbackSummaryError {
   return err instanceof FallbackSummaryError;
 }
 
+// 模型回退运行选项，支持冷却探测等
 export type ModelFallbackRunOptions = {
   allowTransientCooldownProbe?: boolean;
 };
 
+// 执行模型回退的函数签名
 type ModelFallbackRunFn<T> = (
   provider: string,
   model: string,
@@ -74,8 +78,7 @@ type ModelFallbackRunFn<T> = (
 ) => Promise<T>;
 
 /**
- * Fallback abort check. Only treats explicit AbortError names as user aborts.
- * Message-based checks (e.g., "aborted") can mask timeouts and skip fallback.
+ * 判断是否为显式 AbortError（用户主动中断），避免误判超时等异常。
  */
 function isFallbackAbortError(err: unknown): boolean {
   if (!err || typeof err !== "object") {
@@ -92,6 +95,7 @@ function shouldRethrowAbort(err: unknown): boolean {
   return isFallbackAbortError(err) && !isTimeoutError(err);
 }
 
+// 构造模型候选收集器，支持去重和白名单过滤
 function createModelCandidateCollector(allowlist: Set<string> | null | undefined): {
   candidates: ModelCandidate[];
   addExplicitCandidate: (candidate: ModelCandidate) => void;
@@ -125,6 +129,7 @@ function createModelCandidateCollector(allowlist: Set<string> | null | undefined
   return { candidates, addExplicitCandidate, addAllowlistedCandidate };
 }
 
+// 单次模型回退错误处理回调类型
 type ModelFallbackErrorHandler = (attempt: {
   provider: string;
   model: string;
@@ -133,6 +138,7 @@ type ModelFallbackErrorHandler = (attempt: {
   total: number;
 }) => void | Promise<void>;
 
+// 单次模型回退运行结果类型
 type ModelFallbackRunResult<T> = {
   result: T;
   provider: string;
@@ -140,15 +146,19 @@ type ModelFallbackRunResult<T> = {
   attempts: FallbackAttempt[];
 };
 
+// 动态导入的认证运行时类型
 type ModelFallbackAuthRuntime = typeof import("./model-fallback-auth.runtime.js");
 
+// 认证运行时加载 promise，防止重复导入
 let modelFallbackAuthRuntimePromise: Promise<ModelFallbackAuthRuntime> | undefined;
 
+// 动态加载认证运行时模块
 async function loadModelFallbackAuthRuntime() {
   modelFallbackAuthRuntimePromise ??= import("./model-fallback-auth.runtime.js");
   return await modelFallbackAuthRuntimePromise;
 }
 
+// 构造回退成功结果对象
 function buildFallbackSuccess<T>(params: {
   result: T;
   provider: string;
@@ -163,6 +173,7 @@ function buildFallbackSuccess<T>(params: {
   };
 }
 
+// 执行单个候选模型的回退尝试，捕获并归一化错误
 async function runFallbackCandidate<T>(params: {
   run: ModelFallbackRunFn<T>;
   provider: string;
@@ -191,6 +202,7 @@ async function runFallbackCandidate<T>(params: {
   }
 }
 
+// 封装单次候选尝试，成功则返回结果，失败返回错误
 async function runFallbackAttempt<T>(params: {
   run: ModelFallbackRunFn<T>;
   provider: string;
@@ -217,10 +229,12 @@ async function runFallbackAttempt<T>(params: {
   return { error: runResult.error };
 }
 
+// 判断两个模型候选是否相同
 function sameModelCandidate(a: ModelCandidate, b: ModelCandidate): boolean {
   return a.provider === b.provider && a.model === b.model;
 }
 
+// 记录单次候选失败，写入日志和 attempts
 function recordFailedCandidateAttempt(params: {
   attempts: FallbackAttempt[];
   candidate: ModelCandidate;
@@ -263,6 +277,7 @@ function recordFailedCandidateAttempt(params: {
   });
 }
 
+// 所有候选失败时抛出汇总异常，便于上层处理
 function throwFallbackFailureSummary(params: {
   attempts: FallbackAttempt[];
   candidates: ModelCandidate[];
@@ -284,6 +299,7 @@ function throwFallbackFailureSummary(params: {
   );
 }
 
+// 计算所有候选中最早的冷却到期时间
 function resolveFallbackSoonestCooldownExpiry(params: {
   authRuntime: ModelFallbackAuthRuntime | null;
   authStore: AuthProfileStore | null;
@@ -323,6 +339,7 @@ function resolveFallbackSoonestCooldownExpiry(params: {
   return soonest;
 }
 
+// 解析图片模型回退候选链，支持主模型和显式回退
 function resolveImageFallbackCandidates(params: {
   cfg: OpenClawConfig | undefined;
   defaultProvider: string;
@@ -375,6 +392,7 @@ function resolveImageFallbackCandidates(params: {
   return candidates;
 }
 
+// 解析文本模型回退候选链，支持主模型、配置回退、白名单
 function resolveFallbackCandidates(params: {
   cfg: OpenClawConfig | undefined;
   provider: string;
@@ -452,6 +470,7 @@ function resolveFallbackCandidates(params: {
   return candidates;
 }
 
+// 冷却探测相关全局状态
 const lastProbeAttempt = new Map<string, number>();
 const MIN_PROBE_INTERVAL_MS = 30_000; // 30 seconds between probes per key
 const PROBE_MARGIN_MS = 2 * 60 * 1000;
@@ -459,11 +478,13 @@ const PROBE_SCOPE_DELIMITER = "::";
 const PROBE_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_PROBE_KEYS = 256;
 
+// 生成探测节流 key，支持多 agent 隔离
 function resolveProbeThrottleKey(provider: string, agentDir?: string): string {
   const scope = normalizeOptionalString(agentDir) ?? "";
   return scope ? `${scope}${PROBE_SCOPE_DELIMITER}${provider}` : provider;
 }
 
+// 清理过期的探测状态
 function pruneProbeState(now: number): void {
   for (const [key, ts] of lastProbeAttempt) {
     if (!Number.isFinite(ts) || ts <= 0 || now - ts > PROBE_STATE_TTL_MS) {
@@ -472,6 +493,7 @@ function pruneProbeState(now: number): void {
   }
 }
 
+// 保证探测状态 map 不超过上限
 function enforceProbeStateCap(): void {
   while (lastProbeAttempt.size > MAX_PROBE_KEYS) {
     let oldestKey: string | null = null;
@@ -489,18 +511,21 @@ function enforceProbeStateCap(): void {
   }
 }
 
+// 判断当前探测 key 是否允许新探测
 function isProbeThrottleOpen(now: number, throttleKey: string): boolean {
   pruneProbeState(now);
   const lastProbe = lastProbeAttempt.get(throttleKey) ?? 0;
   return now - lastProbe >= MIN_PROBE_INTERVAL_MS;
 }
 
+// 标记一次探测尝试
 function markProbeAttempt(now: number, throttleKey: string): void {
   pruneProbeState(now);
   lastProbeAttempt.set(throttleKey, now);
   enforceProbeStateCap();
 }
 
+// 判断主模型在冷却期是否允许探测
 function shouldProbePrimaryDuringCooldown(params: {
   isPrimary: boolean;
   hasFallbackCandidates: boolean;
@@ -532,6 +557,7 @@ function shouldProbePrimaryDuringCooldown(params: {
 }
 
 /** @internal – exposed for unit tests only */
+// 探测节流内部状态（仅测试用）
 export const _probeThrottleInternals = {
   lastProbeAttempt,
   MIN_PROBE_INTERVAL_MS,
@@ -544,6 +570,7 @@ export const _probeThrottleInternals = {
   markProbeAttempt,
 } as const;
 
+// 冷却决策类型，决定是否跳过或尝试
 type CooldownDecision =
   | {
       type: "skip";
@@ -556,6 +583,7 @@ type CooldownDecision =
       markProbe: boolean;
     };
 
+// 冷却决策主逻辑，决定候选是否跳过/探测
 function resolveCooldownDecision(params: {
   candidate: ModelCandidate;
   isPrimary: boolean;
@@ -630,6 +658,7 @@ function resolveCooldownDecision(params: {
   };
 }
 
+// 主模型回退入口，依次尝试候选模型，支持认证冷却、探测、详细日志
 export async function runWithModelFallback<T>(params: {
   cfg: OpenClawConfig | undefined;
   provider: string;
@@ -914,6 +943,7 @@ export async function runWithModelFallback<T>(params: {
   });
 }
 
+// 图片模型回退入口，逻辑类似文本模型
 export async function runWithImageModelFallback<T>(params: {
   cfg: OpenClawConfig | undefined;
   modelOverride?: string;

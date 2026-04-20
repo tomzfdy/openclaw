@@ -27,6 +27,9 @@ import {
 
 const testProgramContext: ProgramContext = {
   programVersion: "0.0.0-test",
+  channelOptions: [],
+  messageChannelOptions: "",
+  agentChannelOptions: "",
 };
 
 describe("command-registry", () => {
@@ -75,12 +78,12 @@ describe("command-registry", () => {
     registerCoreCliCommands(program, testProgramContext, ["node", "openclaw", "--help"]);
 
     expect(namesOf(program)).toEqual([
-      "setup",
       "dashboard",
       "reset",
-      "uninstall",
       "sessions",
+      "setup",
       "tasks",
+      "uninstall",
     ]);
   });
 

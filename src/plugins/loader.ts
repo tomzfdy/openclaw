@@ -1,3 +1,4 @@
+// 插件加载器：负责插件发现、注册、缓存、激活、异常处理等主流程
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -102,6 +103,7 @@ import type { OpenClawPluginDefinition, OpenClawPluginModule, PluginLogger } fro
 
 export type PluginLoadResult = PluginRegistry;
 
+// 插件加载选项，支持配置、激活、缓存、只加载部分插件等多种模式
 export type PluginLoadOptions = {
   config?: OpenClawConfig;
   activationSourceConfig?: OpenClawConfig;
@@ -128,6 +130,7 @@ export type PluginLoadOptions = {
   throwOnLoadError?: boolean;
 };
 
+// CLI元数据入口文件名集合
 const CLI_METADATA_ENTRY_BASENAMES = [
   "cli-metadata.ts",
   "cli-metadata.js",
@@ -135,6 +138,7 @@ const CLI_METADATA_ENTRY_BASENAMES = [
   "cli-metadata.cjs",
 ] as const;
 
+// 判断memory-dreaming插件是否需要作为sidecar引擎加载
 function resolveDreamingSidecarEngineId(params: {
   cfg: OpenClawConfig;
   memorySlot: string | null | undefined;
@@ -154,6 +158,7 @@ function resolveDreamingSidecarEngineId(params: {
   return dreamingConfig.enabled ? DEFAULT_MEMORY_DREAMING_PLUGIN_ID : null;
 }
 
+// 插件加载失败异常，包含失败插件id和注册表
 export class PluginLoadFailureError extends Error {
   readonly pluginIds: string[];
   readonly registry: PluginRegistry;
@@ -170,6 +175,7 @@ export class PluginLoadFailureError extends Error {
   }
 }
 
+// 插件加载重入异常（防止递归/并发加载同一快照）
 export class PluginLoadReentryError extends Error {
   readonly cacheKey: string;
 
@@ -180,6 +186,7 @@ export class PluginLoadReentryError extends Error {
   }
 }
 
+// 缓存的插件运行时快照
 type CachedPluginState = {
   registry: PluginRegistry;
   memoryCapability: ReturnType<typeof getMemoryCapabilityRegistration>;
@@ -193,6 +200,7 @@ type CachedPluginState = {
   memoryRuntime: ReturnType<typeof getMemoryRuntime>;
 };
 
+// 插件注册表缓存上限
 const MAX_PLUGIN_REGISTRY_CACHE_ENTRIES = 128;
 let pluginRegistryCacheEntryCap = MAX_PLUGIN_REGISTRY_CACHE_ENTRIES;
 const registryCache = new Map<string, CachedPluginState>();
@@ -214,6 +222,7 @@ const LAZY_RUNTIME_REFLECTION_KEYS = [
   "modelAuth",
 ] as const satisfies readonly (keyof PluginRuntime)[];
 
+// 清理插件加载器及相关全局缓存
 export function clearPluginLoaderCache(): void {
   registryCache.clear();
   inFlightPluginRegistryLoads.clear();
@@ -224,12 +233,15 @@ export function clearPluginLoaderCache(): void {
   clearMemoryPluginState();
 }
 
+// 默认插件日志器
 const defaultLogger = () => createSubsystemLogger("plugins");
 
+// 是否启用插件加载性能分析
 function shouldProfilePluginLoader(): boolean {
   return process.env.OPENCLAW_PLUGIN_LOAD_PROFILE === "1";
 }
 
+// 性能分析包装器
 function profilePluginLoaderSync<T>(params: {
   phase: string;
   pluginId?: string;
@@ -259,6 +271,7 @@ function profilePluginLoaderSync<T>(params: {
  * This helper converts Windows absolute import specifiers to file:// URLs and
  * leaves everything else unchanged.
  */
+// Windows下将绝对路径转为file:// URL，兼容Node ESM加载
 function toSafeImportPath(specifier: string): string {
   if (process.platform !== "win32") {
     return specifier;
@@ -276,6 +289,7 @@ function toSafeImportPath(specifier: string): string {
   return specifier;
 }
 
+// 构造Jiti插件加载器，支持别名与缓存
 function createPluginJitiLoader(options: Pick<PluginLoadOptions, "pluginSdkResolution">) {
   const jitiLoaders: PluginJitiLoaderCache = new Map();
   return (modulePath: string) => {
@@ -327,6 +341,7 @@ export const __testing = {
   },
 };
 
+// 获取插件注册表缓存
 function getCachedPluginRegistry(cacheKey: string): CachedPluginState | undefined {
   const cached = registryCache.get(cacheKey);
   if (!cached) {
@@ -338,6 +353,7 @@ function getCachedPluginRegistry(cacheKey: string): CachedPluginState | undefine
   return cached;
 }
 
+// 设置插件注册表缓存，超出上限时淘汰最旧项
 function setCachedPluginRegistry(cacheKey: string, state: CachedPluginState): void {
   if (registryCache.has(cacheKey)) {
     registryCache.delete(cacheKey);
@@ -352,6 +368,7 @@ function setCachedPluginRegistry(cacheKey: string, state: CachedPluginState): vo
   }
 }
 
+// 构建插件注册表缓存key，确保唯一性
 function buildCacheKey(params: {
   workspaceDir?: string;
   plugins: NormalizedPluginsConfig;
@@ -402,6 +419,7 @@ function buildCacheKey(params: {
   })}::${scopeKey}::${setupOnlyKey}::${startupChannelMode}::${moduleLoadMode}::${runtimeSubagentMode}::${params.pluginSdkResolution ?? "auto"}::${gatewayMethodsKey}`;
 }
 
+// 判断插件id是否在onlyPluginIds作用域内
 function matchesScopedPluginRequest(params: {
   onlyPluginIdSet: ReadonlySet<string> | null;
   pluginId: string;
@@ -413,6 +431,7 @@ function matchesScopedPluginRequest(params: {
   return scopedIds.has(params.pluginId);
 }
 
+// 解析运行时子代理模式
 function resolveRuntimeSubagentMode(
   runtimeOptions: PluginLoadOptions["runtimeOptions"],
 ): "default" | "explicit" | "gateway-bindable" {
@@ -425,6 +444,7 @@ function resolveRuntimeSubagentMode(
   return "default";
 }
 
+// 构建激活元数据哈希，确保激活状态变更能刷新缓存
 function buildActivationMetadataHash(params: {
   activationSource: PluginActivationConfigSource;
   autoEnabledReasons: Readonly<Record<string, string[]>>;
@@ -462,6 +482,7 @@ function buildActivationMetadataHash(params: {
     .digest("hex");
 }
 
+// 判断加载选项是否包含影响兼容性的参数
 function hasExplicitCompatibilityInputs(options: PluginLoadOptions): boolean {
   return (
     options.config !== undefined ||
@@ -479,6 +500,7 @@ function hasExplicitCompatibilityInputs(options: PluginLoadOptions): boolean {
   );
 }
 
+// 归一化插件加载上下文，生成缓存key等
 function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
   const env = options.env ?? process.env;
   const cfg = applyTestPluginDefaults(options.config ?? {}, env);
@@ -526,6 +548,7 @@ function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
   };
 }
 
+// 获取当前激活的兼容插件注册表
 function getCompatibleActivePluginRegistry(
   options: PluginLoadOptions = {},
 ): PluginRegistry | undefined {
@@ -562,6 +585,7 @@ function getCompatibleActivePluginRegistry(
   return undefined;
 }
 
+// 获取或加载运行时插件注册表
 export function resolveRuntimePluginRegistry(
   options?: PluginLoadOptions,
 ): PluginRegistry | undefined {
@@ -581,14 +605,17 @@ export function resolveRuntimePluginRegistry(
   return loadOpenClawPlugins(options);
 }
 
+// 获取插件注册表缓存key
 export function resolvePluginRegistryLoadCacheKey(options: PluginLoadOptions = {}): string {
   return resolvePluginLoadCacheContext(options).cacheKey;
 }
 
+// 判断插件注册表是否正在加载中
 export function isPluginRegistryLoadInFlight(options: PluginLoadOptions = {}): boolean {
   return inFlightPluginRegistryLoads.has(resolvePluginRegistryLoadCacheKey(options));
 }
 
+// 获取兼容的运行时插件注册表（不触发新加载）
 export function resolveCompatibleRuntimePluginRegistry(
   options?: PluginLoadOptions,
 ): PluginRegistry | undefined {
@@ -598,6 +625,7 @@ export function resolveCompatibleRuntimePluginRegistry(
   return getCompatibleActivePluginRegistry(options);
 }
 
+// 校验插件配置项，返回校验结果
 function validatePluginConfig(params: {
   schema?: Record<string, unknown>;
   cacheKey?: string;
@@ -620,6 +648,7 @@ function validatePluginConfig(params: {
   return { ok: false, errors: result.errors.map((error) => error.text) };
 }
 
+// 解析插件模块导出，兼容default/命名/函数式
 function resolvePluginModuleExport(moduleExport: unknown): {
   definition?: OpenClawPluginDefinition;
   register?: OpenClawPluginDefinition["register"];
@@ -638,6 +667,7 @@ function resolvePluginModuleExport(moduleExport: unknown): {
   return {};
 }
 
+// 合并setup插件配置段
 function mergeSetupPluginSection<T>(
   baseValue: T | undefined,
   setupValue: T | undefined,
@@ -658,6 +688,7 @@ function mergeSetupPluginSection<T>(
   return setupValue ?? baseValue;
 }
 
+// 解析setup channel插件注册
 function resolveSetupChannelRegistration(moduleExport: unknown): {
   plugin?: ChannelPlugin;
   loadError?: unknown;
@@ -708,6 +739,7 @@ function resolveSetupChannelRegistration(moduleExport: unknown): {
   };
 }
 
+// 判断channel插件是否应在setup runtime加载
 function shouldLoadChannelPluginInSetupRuntime(params: {
   manifestChannels: string[];
   setupSource?: string;
@@ -730,6 +762,7 @@ function shouldLoadChannelPluginInSetupRuntime(params: {
   );
 }
 
+// 构造插件注册表记录
 function createPluginRecord(params: {
   id: string;
   name?: string;
@@ -795,12 +828,14 @@ function createPluginRecord(params: {
   };
 }
 
+// 标记插件激活为禁用
 function markPluginActivationDisabled(record: PluginRecord, reason?: string): void {
   record.activated = false;
   record.activationSource = "disabled";
   record.activationReason = reason;
 }
 
+// 格式化自动激活原因
 function formatAutoEnabledActivationReason(
   reasons: readonly string[] | undefined,
 ): string | undefined {
@@ -810,6 +845,7 @@ function formatAutoEnabledActivationReason(
   return reasons.join("; ");
 }
 
+// 记录插件加载/注册错误，写入诊断与注册表
 function recordPluginError(params: {
   logger: PluginLogger;
   registry: PluginRegistry;
@@ -848,6 +884,7 @@ function recordPluginError(params: {
   });
 }
 
+// 汇总插件失败信息
 function formatPluginFailureSummary(failedPlugins: PluginRecord[]): string {
   const grouped = new Map<NonNullable<PluginRecord["failurePhase"]>, string[]>();
   for (const plugin of failedPlugins) {
@@ -862,10 +899,12 @@ function formatPluginFailureSummary(failedPlugins: PluginRecord[]): string {
   return [...grouped.entries()].map(([phase, ids]) => `${phase}: ${ids.join(", ")}`).join("; ");
 }
 
+// 批量追加诊断信息
 function pushDiagnostics(diagnostics: PluginDiagnostic[], append: PluginDiagnostic[]) {
   diagnostics.push(...append);
 }
 
+// 如有插件加载失败且要求抛出，则抛异常
 function maybeThrowOnPluginLoadError(
   registry: PluginRegistry,
   throwOnLoadError: boolean | undefined,
@@ -879,25 +918,30 @@ function maybeThrowOnPluginLoadError(
   throw new PluginLoadFailureError(registry);
 }
 
+// 路径匹配器类型
 type PathMatcher = {
   exact: Set<string>;
   dirs: string[];
 };
 
+// 安装追踪规则类型
 type InstallTrackingRule = {
   trackedWithoutPaths: boolean;
   matcher: PathMatcher;
 };
 
+// 插件溯源索引类型
 type PluginProvenanceIndex = {
   loadPathMatcher: PathMatcher;
   installRules: Map<string, InstallTrackingRule>;
 };
 
+// 创建路径匹配器
 function createPathMatcher(): PathMatcher {
   return { exact: new Set<string>(), dirs: [] };
 }
 
+// 向路径匹配器添加路径
 function addPathToMatcher(
   matcher: PathMatcher,
   rawPath: string,
@@ -922,6 +966,7 @@ function addPathToMatcher(
   matcher.exact.add(resolved);
 }
 
+// 判断sourcePath是否匹配matcher
 function matchesPathMatcher(matcher: PathMatcher, sourcePath: string): boolean {
   if (matcher.exact.has(sourcePath)) {
     return true;
@@ -929,6 +974,7 @@ function matchesPathMatcher(matcher: PathMatcher, sourcePath: string): boolean {
   return matcher.dirs.some((dirPath) => isPathInside(dirPath, sourcePath));
 }
 
+// 构建插件溯源索引
 function buildProvenanceIndex(params: {
   config: OpenClawConfig;
   normalizedLoadPaths: string[];
@@ -962,6 +1008,7 @@ function buildProvenanceIndex(params: {
   return { loadPathMatcher, installRules };
 }
 
+// 判断插件是否被溯源规则追踪
 function isTrackedByProvenance(params: {
   pluginId: string;
   source: string;
@@ -981,6 +1028,7 @@ function isTrackedByProvenance(params: {
   return matchesPathMatcher(params.index.loadPathMatcher, sourcePath);
 }
 
+// 判断是否匹配显式安装规则
 function matchesExplicitInstallRule(params: {
   pluginId: string;
   source: string;
@@ -995,6 +1043,7 @@ function matchesExplicitInstallRule(params: {
   return matchesPathMatcher(installRule.matcher, sourcePath);
 }
 
+// 计算候选插件的优先级rank
 function resolveCandidateDuplicateRank(params: {
   candidate: ReturnType<typeof discoverOpenClawPlugins>["candidates"][number];
   manifestByRoot: Map<string, ReturnType<typeof loadPluginManifestRegistry>["plugins"][number]>;
@@ -1029,6 +1078,7 @@ function resolveCandidateDuplicateRank(params: {
   return 4;
 }
 
+// 比较两个候选插件的优先级顺序
 function compareDuplicateCandidateOrder(params: {
   left: ReturnType<typeof discoverOpenClawPlugins>["candidates"][number];
   right: ReturnType<typeof discoverOpenClawPlugins>["candidates"][number];
@@ -1057,6 +1107,7 @@ function compareDuplicateCandidateOrder(params: {
   );
 }
 
+// 检查并警告allowlist为空时的自动发现风险
 function warnWhenAllowlistIsOpen(params: {
   emitWarning: boolean;
   logger: PluginLogger;
@@ -1094,6 +1145,7 @@ function warnWhenAllowlistIsOpen(params: {
   );
 }
 
+// 检查并警告未被追踪的已加载插件
 function warnAboutUntrackedLoadedPlugins(params: {
   registry: PluginRegistry;
   provenance: PluginProvenanceIndex;
@@ -1134,6 +1186,7 @@ function warnAboutUntrackedLoadedPlugins(params: {
   }
 }
 
+// 激活插件注册表并初始化全局hook
 function activatePluginRegistry(
   registry: PluginRegistry,
   cacheKey: string,
@@ -1144,6 +1197,7 @@ function activatePluginRegistry(
   initializeGlobalHookRunner(registry);
 }
 
+// 主插件加载流程：发现、注册、校验、缓存、激活、异常处理
 export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegistry {
   // Snapshot (non-activating) loads must disable the cache to avoid storing a registry
   // whose commands were never globally registered.
@@ -1916,6 +1970,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
   }
 }
 
+// CLI专用插件注册表加载流程
 export async function loadOpenClawPluginCliRegistry(
   options: PluginLoadOptions = {},
 ): Promise<PluginRegistry> {

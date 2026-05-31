@@ -20,6 +20,7 @@
       ],
       "env": {
         "OUTPUT_SOURCE_MAPS": "1",
+        "OPENCLAW_NO_RESPAWN": "1",
         "OPENCLAW_PROFILE": "dev",
         "OPENCLAW_GATEWAY_PORT": "19001",
         "OPENCLAW_SKIP_CHANNELS": "1"
@@ -43,6 +44,7 @@
       ],
       "env": {
         "OUTPUT_SOURCE_MAPS": "1",
+        "OPENCLAW_NO_RESPAWN": "1",
         "OPENCLAW_PROFILE": "dev",
         "OPENCLAW_GATEWAY_PORT": "19001",
         "OPENCLAW_SKIP_CHANNELS": "1"

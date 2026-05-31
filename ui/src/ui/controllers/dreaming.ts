@@ -1,4 +1,4 @@
-import type { GatewayBrowserClient } from "../gateway.ts";
+import type { GatewayBrowserClient, GatewayHelloOk } from "../gateway.ts";
 import { isPluginEnabledInConfigSnapshot } from "../plugin-activation.ts";
 import type { ConfigSnapshot } from "../types.ts";
 
@@ -26,6 +26,7 @@ type DeepDreamingStatus = DreamingPhaseStatusBase & {
   minUniqueQueries: number;
   recencyHalfLifeDays: number;
   maxAgeDays?: number;
+  maxPromotedSnippetTokens?: number;
 };
 
 type RemDreamingStatus = DreamingPhaseStatusBase & {
@@ -149,8 +150,12 @@ export type WikiMemoryPalaceCluster = {
   items: WikiMemoryPalaceItem[];
 };
 
+export type WikiMemoryPalacePageCounts = Record<WikiMemoryPalaceItem["kind"], number>;
+
 export type WikiMemoryPalace = {
   totalItems: number;
+  totalPages: number;
+  pageCounts: WikiMemoryPalacePageCounts;
   totalClaims: number;
   totalQuestions: number;
   totalContradictions: number;
@@ -192,6 +197,8 @@ type WikiImportInsightsPayload = {
 
 type WikiMemoryPalacePayload = {
   totalItems?: unknown;
+  totalPages?: unknown;
+  pageCounts?: unknown;
   totalClaims?: unknown;
   totalQuestions?: unknown;
   totalContradictions?: unknown;
@@ -201,6 +208,7 @@ type WikiMemoryPalacePayload = {
 export type DreamingState = {
   client: GatewayBrowserClient | null;
   connected: boolean;
+  hello: GatewayHelloOk | null;
   configSnapshot: ConfigSnapshot | null;
   applySessionKey: string;
   dreamingStatusLoading: boolean;
@@ -234,6 +242,22 @@ function isMemoryWikiEnabled(state: DreamingState): boolean {
   return isPluginEnabledInConfigSnapshot(state.configSnapshot, MEMORY_WIKI_PLUGIN_ID, {
     enabledByDefault: false,
   });
+}
+
+function hasGatewayMethod(state: DreamingState, method: string): boolean | null {
+  const methods = state.hello?.features?.methods;
+  if (!Array.isArray(methods)) {
+    return null;
+  }
+  return methods.includes(method);
+}
+
+function canCallMemoryWikiMethod(state: DreamingState, method: string): boolean {
+  const available = hasGatewayMethod(state, method);
+  if (available !== null) {
+    return available;
+  }
+  return isMemoryWikiEnabled(state);
 }
 
 function buildDreamDiaryActionSuccessMessage(
@@ -535,6 +559,40 @@ function normalizeWikiPageKind(value: unknown): WikiMemoryPalaceItem["kind"] | u
     : undefined;
 }
 
+function createEmptyWikiMemoryPalacePageCounts(): WikiMemoryPalacePageCounts {
+  return {
+    synthesis: 0,
+    entity: 0,
+    concept: 0,
+    source: 0,
+    report: 0,
+  };
+}
+
+function normalizeWikiMemoryPalacePageCounts(
+  raw: unknown,
+  fallback: WikiMemoryPalacePageCounts,
+): WikiMemoryPalacePageCounts {
+  const record = asRecord(raw);
+  return {
+    synthesis: normalizeFiniteInt(record?.synthesis, fallback.synthesis),
+    entity: normalizeFiniteInt(record?.entity, fallback.entity),
+    concept: normalizeFiniteInt(record?.concept, fallback.concept),
+    source: normalizeFiniteInt(record?.source, fallback.source),
+    report: normalizeFiniteInt(record?.report, fallback.report),
+  };
+}
+
+function sumWikiMemoryPalacePageCounts(pageCounts: WikiMemoryPalacePageCounts): number {
+  return (
+    pageCounts.synthesis +
+    pageCounts.entity +
+    pageCounts.concept +
+    pageCounts.source +
+    pageCounts.report
+  );
+}
+
 function normalizeWikiMemoryPalaceItem(raw: unknown): WikiMemoryPalaceItem | null {
   const record = asRecord(raw);
   const pagePath = normalizeTrimmedString(record?.pagePath);
@@ -608,11 +666,20 @@ function normalizeWikiMemoryPalace(raw: unknown): WikiMemoryPalace {
         .map((entry) => normalizeWikiMemoryPalaceCluster(entry))
         .filter((entry): entry is WikiMemoryPalaceCluster => entry !== null)
     : [];
+  const totalItems = normalizeFiniteInt(
+    record?.totalItems,
+    clusters.reduce((sum, cluster) => sum + cluster.itemCount, 0),
+  );
+  const fallbackPageCounts = createEmptyWikiMemoryPalacePageCounts();
+  for (const cluster of clusters) {
+    fallbackPageCounts[cluster.key] += cluster.itemCount;
+  }
+  const pageCounts = normalizeWikiMemoryPalacePageCounts(record?.pageCounts, fallbackPageCounts);
+  const fallbackTotalPages = sumWikiMemoryPalacePageCounts(pageCounts) || totalItems;
   return {
-    totalItems: normalizeFiniteInt(
-      record?.totalItems,
-      clusters.reduce((sum, cluster) => sum + cluster.itemCount, 0),
-    ),
+    totalItems,
+    totalPages: normalizeFiniteInt(record?.totalPages, fallbackTotalPages),
+    pageCounts,
     totalClaims: normalizeFiniteInt(
       record?.totalClaims,
       clusters.reduce((sum, cluster) => sum + cluster.claimCount, 0),
@@ -655,6 +722,15 @@ function normalizeDreamingStatus(raw: unknown): DreamingStatus | null {
             recencyHalfLifeDays: normalizeFiniteInt(deepRecord.recencyHalfLifeDays, 0),
             ...(typeof deepRecord.maxAgeDays === "number" && Number.isFinite(deepRecord.maxAgeDays)
               ? { maxAgeDays: normalizeFiniteInt(deepRecord.maxAgeDays, 0) }
+              : {}),
+            ...(typeof deepRecord.maxPromotedSnippetTokens === "number" &&
+            Number.isFinite(deepRecord.maxPromotedSnippetTokens)
+              ? {
+                  maxPromotedSnippetTokens: normalizeFiniteInt(
+                    deepRecord.maxPromotedSnippetTokens,
+                    0,
+                  ),
+                }
               : {}),
           },
           rem: {
@@ -748,7 +824,7 @@ export async function loadWikiImportInsights(state: DreamingState): Promise<void
   if (!state.client || !state.connected || state.wikiImportInsightsLoading) {
     return;
   }
-  if (!isMemoryWikiEnabled(state)) {
+  if (!canCallMemoryWikiMethod(state, "wiki.importInsights")) {
     state.wikiImportInsights = null;
     state.wikiImportInsightsError = null;
     return;
@@ -772,7 +848,7 @@ export async function loadWikiMemoryPalace(state: DreamingState): Promise<void> 
   if (!state.client || !state.connected || state.wikiMemoryPalaceLoading) {
     return;
   }
-  if (!isMemoryWikiEnabled(state)) {
+  if (!canCallMemoryWikiMethod(state, "wiki.palace")) {
     state.wikiMemoryPalace = null;
     state.wikiMemoryPalaceError = null;
     return;

@@ -1,8 +1,6 @@
 import MarkdownIt from "markdown-it";
-import {
-  isAutoLinkedFileRef,
-  normalizeLowercaseStringOrEmpty,
-} from "openclaw/plugin-sdk/text-runtime";
+import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { isAutoLinkedFileRef } from "openclaw/plugin-sdk/text-autolink-runtime";
 import type { MatrixClient } from "./sdk.js";
 import { isMatrixQualifiedUserId } from "./target-ids.js";
 
@@ -34,8 +32,11 @@ type MatrixMentionCandidate = {
 
 const ESCAPED_MENTION_SENTINEL = "\uE000";
 const MENTION_PATTERN = /@[A-Za-z0-9._=+\-/:[\]]+/g;
-const MATRIX_MENTION_USER_ID_PATTERN =
-  /^@[A-Za-z0-9._=+\-/]+:(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d+)?$/;
+const MATRIX_MENTION_SERVER_NAME_PATTERN =
+  /(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?))*(?::\d+)?/;
+const MATRIX_MENTION_USER_ID_PATTERN = new RegExp(
+  `^@[A-Za-z0-9._=+\\-/]+:(?:${MATRIX_MENTION_SERVER_NAME_PATTERN.source}|\\[[0-9A-Fa-f:.]+\\](?::\\d+)?)$`,
+);
 const TRIMMABLE_MENTION_SUFFIX = /[),.!?:;\]]/;
 
 function shouldSuppressAutoLink(

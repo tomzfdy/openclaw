@@ -13,16 +13,50 @@ import type {
   TerminationReason,
 } from "./types.js";
 
+type SupervisorLogRuntime = typeof import("./supervisor-log.runtime.js");
+
 type ActiveRun = {
   run: ManagedRun;
   scopeKey?: string;
 };
+
+const GRACEFUL_CANCEL_TIMEOUT_MS = 5000;
+const DEFAULT_MAX_CAPTURED_OUTPUT_CHARS = 1024 * 1024;
+
+let supervisorLogRuntimePromise: Promise<SupervisorLogRuntime> | undefined;
+
+function loadSupervisorLogRuntime(): Promise<SupervisorLogRuntime> {
+  supervisorLogRuntimePromise ??= import("./supervisor-log.runtime.js");
+  return supervisorLogRuntimePromise;
+}
 
 function clampTimeout(value?: number): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
   }
   return Math.max(1, Math.floor(value));
+}
+
+function clampCapturedOutputChars(value?: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_CAPTURED_OUTPUT_CHARS;
+  }
+  return Math.max(256, Math.floor(value));
+}
+
+function appendCapturedOutput(
+  current: string,
+  chunk: string,
+  stream: "stdout" | "stderr",
+  maxChars: number,
+) {
+  const next = current + chunk;
+  if (next.length <= maxChars) {
+    return next;
+  }
+  const marker = `[openclaw: captured ${stream} truncated to last ${maxChars} chars]\n`;
+  const tailChars = Math.max(0, maxChars - marker.length);
+  return `${marker}${next.slice(-tailChars)}`;
 }
 
 function isTimeoutReason(reason: TerminationReason) {
@@ -82,7 +116,9 @@ export function createProcessSupervisor(): ProcessSupervisor {
     let stderr = "";
     let timeoutTimer: NodeJS.Timeout | null = null;
     let noOutputTimer: NodeJS.Timeout | null = null;
+    let forceKillTimer: NodeJS.Timeout | null = null;
     const captureOutput = input.captureOutput !== false;
+    const maxCapturedOutputChars = clampCapturedOutputChars(input.maxCapturedOutputChars);
 
     const overallTimeoutMs = clampTimeout(input.timeoutMs);
     const noOutputTimeoutMs = clampTimeout(input.noOutputTimeoutMs);
@@ -154,13 +190,23 @@ export function createProcessSupervisor(): ProcessSupervisor {
           clearTimeout(noOutputTimer);
           noOutputTimer = null;
         }
+        if (forceKillTimer) {
+          clearTimeout(forceKillTimer);
+          forceKillTimer = null;
+        }
       };
 
       cancelAdapter = (_reason: TerminationReason) => {
-        if (settled) {
+        if (settled || forceKillTimer) {
           return;
         }
-        adapter.kill("SIGKILL");
+        adapter.kill("SIGTERM");
+        forceKillTimer = setTimeout(() => {
+          if (!settled) {
+            adapter.kill("SIGKILL");
+          }
+        }, GRACEFUL_CANCEL_TIMEOUT_MS);
+        forceKillTimer.unref?.();
       };
 
       if (overallTimeoutMs) {
@@ -176,14 +222,14 @@ export function createProcessSupervisor(): ProcessSupervisor {
 
       adapter.onStdout((chunk) => {
         if (captureOutput) {
-          stdout += chunk;
+          stdout = appendCapturedOutput(stdout, chunk, "stdout", maxCapturedOutputChars);
         }
         input.onStdout?.(chunk);
         touchOutput();
       });
       adapter.onStderr((chunk) => {
         if (captureOutput) {
-          stderr += chunk;
+          stderr = appendCapturedOutput(stderr, chunk, "stderr", maxCapturedOutputChars);
         }
         input.onStderr?.(chunk);
         touchOutput();
@@ -263,7 +309,7 @@ export function createProcessSupervisor(): ProcessSupervisor {
         exitCode: null,
         exitSignal: null,
       });
-      const { warnProcessSupervisorSpawnFailure } = await import("./supervisor-log.runtime.js");
+      const { warnProcessSupervisorSpawnFailure } = await loadSupervisorLogRuntime();
       warnProcessSupervisorSpawnFailure(`spawn failed: runId=${runId} reason=${String(err)}`);
       throw err;
     }

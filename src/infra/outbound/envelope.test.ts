@@ -5,7 +5,7 @@ import type { OutboundDeliveryJson } from "./format.js";
 
 describe("buildOutboundResultEnvelope", () => {
   const delivery: OutboundDeliveryJson = {
-    channel: "telegram",
+    channel: "alpha",
     via: "direct",
     to: "123",
     messageId: "m1",
@@ -28,6 +28,25 @@ describe("buildOutboundResultEnvelope", () => {
         payloads: [{ text: "hi", mediaUrl: null, mediaUrls: undefined }],
         meta: { ok: true },
       },
+    },
+    {
+      input: {
+        payloads: [],
+        delivery,
+        meta: { delivered: true },
+      },
+      expected: {
+        payloads: [],
+        meta: { delivered: true },
+        delivery,
+      },
+    },
+    {
+      input: {
+        delivery,
+        flattenDelivery: false,
+      },
+      expected: { delivery },
     },
   ])("formats outbound envelope for %j", ({ input, expected }) => {
     const envelope = buildOutboundResultEnvelope(input);

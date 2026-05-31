@@ -1,12 +1,14 @@
 import { html, nothing } from "lit";
-import {
-  buildAgentMainSessionKey,
-  parseAgentSessionKey,
-  resolveAgentIdFromSessionKey,
-} from "../../../src/routing/session-key.js";
+import { styleMap } from "lit/directives/style-map.js";
 import { t } from "../i18n/index.ts";
 import { getSafeLocalStorage } from "../local-storage.ts";
-import { refreshChatAvatar } from "./app-chat.ts";
+import {
+  createChatSessionsLoadOverrides,
+  hasAbortableSessionRun,
+  refreshChat,
+  scopedAgentParamsForSession,
+} from "./app-chat.ts";
+import { DEFAULT_CRON_FORM } from "./app-defaults.ts";
 import { renderUsageTab } from "./app-render-usage-tab.ts";
 import {
   renderChatControls,
@@ -14,12 +16,21 @@ import {
   renderChatSessionSelect,
   renderTab,
   resolveAssistantAttachmentAuthToken,
+  resolveDashboardHeaderContext,
   renderSidebarConnectionStatus,
   renderTopbarThemeModeToggle,
+  createChatSession,
+  dismissChatError,
   switchChatSession,
 } from "./app-render.helpers.ts";
-import { warnQueryToken } from "./app-settings.ts";
+import { hasOperatorWriteAccess, warnQueryToken } from "./app-settings.ts";
 import type { AppViewState } from "./app-view-state.ts";
+import { reconcileChatRunLifecycle } from "./chat/run-lifecycle.ts";
+import {
+  controlUiNowMs,
+  recordControlUiRenderTiming,
+  roundedControlUiDurationMs,
+} from "./control-ui-performance.ts";
 import { loadAgentFileContent, loadAgentFiles, saveAgentFile } from "./controllers/agent-files.ts";
 import { loadAgentIdentities, loadAgentIdentity } from "./controllers/agent-identity.ts";
 import { loadAgentSkills } from "./controllers/agent-skills.ts";
@@ -32,6 +43,7 @@ import {
   refreshVisibleToolsEffectiveForCurrentSession,
   saveAgentsConfig,
 } from "./controllers/agents.ts";
+import { setAssistantAvatarOverride } from "./controllers/assistant-identity.ts";
 import { loadChannels } from "./controllers/channels.ts";
 import { loadChatHistory } from "./controllers/chat.ts";
 import {
@@ -40,8 +52,12 @@ import {
   findAgentConfigEntryIndex,
   loadConfig,
   openConfigFile,
+  resetConfigPendingChanges,
   runUpdate,
   saveConfig,
+  stageDefaultAgentConfigEntry,
+  stageConfigPreset,
+  updateConfigRawValue,
   updateConfigFormValue,
   removeConfigFormValue,
 } from "./controllers/config.ts";
@@ -98,6 +114,7 @@ import {
   branchSessionFromCheckpoint,
   deleteSessionsAndRefresh,
   loadSessions,
+  parseSessionsFilterInteger,
   patchSession,
   restoreSessionFromCheckpoint,
   toggleSessionCompactionCheckpoints,
@@ -105,6 +122,7 @@ import {
 import {
   closeClawHubDetail,
   installFromClawHub,
+  loadSkillCard,
   installSkill,
   loadClawHubDetail,
   loadSkills,
@@ -114,11 +132,37 @@ import {
   updateSkillEdit,
   updateSkillEnabled,
 } from "./controllers/skills.ts";
+import { captureSessionToWorkboard, getWorkboardState } from "./controllers/workboard.ts";
+import { getCronJobPayload } from "./cron-payload.ts";
 import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "./external-link.ts";
-import "./components/dashboard-header.ts";
+import { formatRelativeTimestamp } from "./format.ts";
 import { icons } from "./icons.ts";
-import { normalizeBasePath, TAB_GROUPS, subtitleForTab, titleForTab } from "./navigation.ts";
+import { createLazyView, renderLazyView } from "./lazy-view.ts";
+import {
+  iconForTab,
+  isSettingsTab,
+  normalizeBasePath,
+  pathForTab,
+  SETTINGS_TABS,
+  TAB_GROUPS,
+  subtitleForTab,
+  titleForTab,
+  type Tab,
+} from "./navigation.ts";
 import { isPluginEnabledInConfigSnapshot } from "./plugin-activation.ts";
+import { isCronSessionKey, resolveSessionDisplayName } from "./session-display.ts";
+import "./components/dashboard-header.ts";
+import {
+  buildAgentMainSessionKey,
+  isSubagentSessionKey,
+  parseAgentSessionKey,
+  resolveAgentIdFromSessionKey,
+} from "./session-key.ts";
+import { loadLocalAssistantIdentity } from "./storage.ts";
+import { normalizeStringEntries } from "./string-coerce.ts";
+import { normalizeOptionalString } from "./string-coerce.ts";
+import type { GatewaySessionRow } from "./types.ts";
+import { isRenderableControlUiAvatarUrl } from "./views/agents-utils.ts";
 import { agentLogoUrl } from "./views/agents-utils.ts";
 import {
   resolveAgentConfig,
@@ -129,45 +173,205 @@ import {
 } from "./views/agents-utils.ts";
 import { renderChat } from "./views/chat.ts";
 import { renderCommandPalette } from "./views/command-palette.ts";
+import { getPresetById } from "./views/config-presets.ts";
+import { renderQuickSettings, type QuickSettingsChannel } from "./views/config-quick.ts";
 import { renderConfig, type ConfigProps } from "./views/config.ts";
+import {
+  renderCronQuickCreate,
+  createDefaultDraft,
+  draftToCronFormPatch,
+} from "./views/cron-quick-create.ts";
+import { renderDreamingRestartConfirmation } from "./views/dreaming-restart-confirmation.ts";
 import { renderDreaming } from "./views/dreaming.ts";
 import { renderExecApprovalPrompt } from "./views/exec-approval.ts";
 import { renderGatewayUrlConfirmation } from "./views/gateway-url-confirmation.ts";
 import { renderLoginGate } from "./views/login-gate.ts";
 import { renderOverview } from "./views/overview.ts";
 
-// Lazy-loaded view modules – deferred so the initial bundle stays small.
-// Each loader resolves once; subsequent calls return the cached module.
-type LazyState<T> = { mod: T | null; promise: Promise<T> | null };
+let pendingUpdate: (() => void) | undefined;
 
-let _pendingUpdate: (() => void) | undefined;
+const notifyLazyViewChanged = () => pendingUpdate?.();
 
-function createLazy<T>(loader: () => Promise<T>): () => T | null {
-  const s: LazyState<T> = { mod: null, promise: null };
-  return () => {
-    if (s.mod) {
-      return s.mod;
-    }
-    if (!s.promise) {
-      s.promise = loader().then((m) => {
-        s.mod = m;
-        _pendingUpdate?.();
-        return m;
-      });
-    }
-    return null;
-  };
+function renderSettingsSectionNav(state: AppViewState) {
+  if (!isSettingsTab(state.tab)) {
+    return nothing;
+  }
+  return html`
+    <nav class="settings-section-nav" aria-label=${t("common.settingsSections")}>
+      ${SETTINGS_TABS.map((tab) => {
+        const active = state.tab === tab;
+        const href = pathForTab(tab, state.basePath);
+        return html`
+          <a
+            href=${href}
+            class="settings-section-nav__item ${active ? "settings-section-nav__item--active" : ""}"
+            @click=${(event: MouseEvent) => {
+              if (
+                event.defaultPrevented ||
+                event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey
+              ) {
+                return;
+              }
+              event.preventDefault();
+              state.setTab(tab);
+            }}
+            title=${titleForTab(tab)}
+          >
+            <span class="settings-section-nav__icon" aria-hidden="true"
+              >${icons[iconForTab(tab)]}</span
+            >
+            <span class="settings-section-nav__label">${titleForTab(tab)}</span>
+          </a>
+        `;
+      })}
+    </nav>
+  `;
 }
 
-const lazyAgents = createLazy(() => import("./views/agents.ts"));
-const lazyChannels = createLazy(() => import("./views/channels.ts"));
-const lazyCron = createLazy(() => import("./views/cron.ts"));
-const lazyDebug = createLazy(() => import("./views/debug.ts"));
-const lazyInstances = createLazy(() => import("./views/instances.ts"));
-const lazyLogs = createLazy(() => import("./views/logs.ts"));
-const lazyNodes = createLazy(() => import("./views/nodes.ts"));
-const lazySessions = createLazy(() => import("./views/sessions.ts"));
-const lazySkills = createLazy(() => import("./views/skills.ts"));
+function renderSettingsWorkspace(state: AppViewState, body: unknown) {
+  return html`
+    <section class="settings-workspace">
+      ${renderSettingsSectionNav(state)}
+      <div class="settings-workspace__body">${body}</div>
+    </section>
+  `;
+}
+
+function isSidebarSessionBusy(state: AppViewState) {
+  return (
+    state.chatLoading ||
+    state.chatSending ||
+    Boolean(state.chatRunId) ||
+    state.chatStream !== null ||
+    state.chatQueue.length > 0
+  );
+}
+
+function resolveSidebarRecentSessions(state: AppViewState): GatewaySessionRow[] {
+  return (state.sessionsResult?.sessions ?? [])
+    .filter(
+      (row) =>
+        !row.archived &&
+        row.kind !== "global" &&
+        row.kind !== "unknown" &&
+        row.kind !== "cron" &&
+        !isCronSessionKey(row.key) &&
+        !isSubagentSessionKey(row.key) &&
+        !row.spawnedBy,
+    )
+    .toSorted((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+    .slice(0, 5);
+}
+
+function renderSidebarSessions(state: AppViewState) {
+  const collapsed = state.settings.navCollapsed;
+  const busy = isSidebarSessionBusy(state);
+  const recent = collapsed ? [] : resolveSidebarRecentSessions(state);
+  const newSessionDisabled = !state.connected || state.sessionsLoading || busy || !state.client;
+  const newSessionTitle = !state.connected
+    ? "Connect to create a new session"
+    : busy
+      ? "Finish the active run before creating a new session"
+      : "New session";
+
+  return html`
+    <section class="sidebar-sessions ${collapsed ? "sidebar-sessions--collapsed" : ""}">
+      <button
+        type="button"
+        class="sidebar-new-session"
+        title=${newSessionTitle}
+        aria-label=${t("chat.runControls.newSession")}
+        ?disabled=${newSessionDisabled}
+        @click=${async () => {
+          if (newSessionDisabled) {
+            return;
+          }
+          if (await createChatSession(state)) {
+            state.setTab("chat" as import("./navigation.ts").Tab);
+          }
+        }}
+      >
+        <span class="sidebar-new-session__icon" aria-hidden="true">${icons.plus}</span>
+        ${collapsed
+          ? nothing
+          : html`<span class="sidebar-new-session__label"
+              >${t("chat.runControls.newSession")}</span
+            >`}
+      </button>
+      ${collapsed || recent.length === 0
+        ? nothing
+        : html`
+            <div class="sidebar-recent-sessions" aria-label=${t("overview.cards.recentSessions")}>
+              <div class="sidebar-recent-sessions__label">${t("usage.sessions.recentShort")}</div>
+              <div class="sidebar-recent-sessions__list">
+                ${recent.map((row) => renderSidebarRecentSession(state, row))}
+              </div>
+            </div>
+          `}
+    </section>
+  `;
+}
+
+function renderSidebarRecentSession(state: AppViewState, row: GatewaySessionRow) {
+  const active = row.key === state.sessionKey;
+  const label = resolveSessionDisplayName(row.key, row);
+  const meta = row.updatedAt ? formatRelativeTimestamp(row.updatedAt) : "n/a";
+  const href = `${pathForTab("chat", state.basePath)}?session=${encodeURIComponent(row.key)}`;
+  return html`
+    <a
+      href=${href}
+      class="sidebar-recent-session ${active ? "sidebar-recent-session--active" : ""}"
+      title=${`${label} · ${row.key}`}
+      @click=${(event: MouseEvent) => {
+        if (
+          event.defaultPrevented ||
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        event.preventDefault();
+        if (row.key !== state.sessionKey) {
+          switchChatSession(state, row.key);
+        }
+        state.setTab("chat" as import("./navigation.ts").Tab);
+      }}
+    >
+      <span class="sidebar-recent-session__dot" aria-hidden="true"></span>
+      <span class="sidebar-recent-session__body">
+        <span class="sidebar-recent-session__name">${label}</span>
+        <span class="sidebar-recent-session__meta">${meta}</span>
+      </span>
+      ${row.hasActiveRun
+        ? html`<span
+            class="sidebar-recent-session__live"
+            aria-label=${t("sessions.sessionDetails.activeRun")}
+          ></span>`
+        : nothing}
+    </a>
+  `;
+}
+
+// Lazy-loaded view modules are deferred so the initial bundle stays small.
+// The shared loader renders visible fallback states instead of leaving a tab blank.
+const lazyAgents = createLazyView(() => import("./views/agents.ts"), notifyLazyViewChanged);
+const lazyActivity = createLazyView(() => import("./views/activity.ts"), notifyLazyViewChanged);
+const lazyChannels = createLazyView(() => import("./views/channels.ts"), notifyLazyViewChanged);
+const lazyCron = createLazyView(() => import("./views/cron.ts"), notifyLazyViewChanged);
+const lazyDebug = createLazyView(() => import("./views/debug.ts"), notifyLazyViewChanged);
+const lazyInstances = createLazyView(() => import("./views/instances.ts"), notifyLazyViewChanged);
+const lazyLogs = createLazyView(() => import("./views/logs.ts"), notifyLazyViewChanged);
+const lazyNodes = createLazyView(() => import("./views/nodes.ts"), notifyLazyViewChanged);
+const lazySessions = createLazyView(() => import("./views/sessions.ts"), notifyLazyViewChanged);
+const lazySkills = createLazyView(() => import("./views/skills.ts"), notifyLazyViewChanged);
+const lazyWorkboard = createLazyView(() => import("./views/workboard.ts"), notifyLazyViewChanged);
 
 function formatDreamNextCycle(nextRunAtMs: number | undefined): string | null {
   if (typeof nextRunAtMs !== "number" || !Number.isFinite(nextRunAtMs)) {
@@ -185,18 +389,19 @@ function resolveDreamingNextCycle(
   if (!status?.phases) {
     return null;
   }
-  const nextRunAtMs = Object.values(status.phases)
-    .filter((phase) => phase.enabled && typeof phase.nextRunAtMs === "number")
-    .map((phase) => phase.nextRunAtMs as number)
-    .toSorted((a, b) => a - b)[0];
+  let nextRunAtMs: number | undefined;
+  for (const phase of Object.values(status.phases)) {
+    if (!phase.enabled || typeof phase.nextRunAtMs !== "number") {
+      continue;
+    }
+    if (nextRunAtMs === undefined || phase.nextRunAtMs < nextRunAtMs) {
+      nextRunAtMs = phase.nextRunAtMs;
+    }
+  }
   return formatDreamNextCycle(nextRunAtMs);
 }
 
 let clawhubSearchTimer: ReturnType<typeof setTimeout> | null = null;
-function lazyRender<M>(getter: () => M | null, render: (mod: M) => unknown) {
-  const mod = getter();
-  return mod ? render(mod) : nothing;
-}
 
 const UPDATE_BANNER_DISMISS_KEY = "openclaw:control-ui:update-banner-dismissed:v1";
 const CRON_THINKING_SUGGESTIONS = ["off", "minimal", "low", "medium", "high"];
@@ -295,9 +500,14 @@ function dismissUpdateBanner(updateAvailable: unknown) {
   }
 }
 
-const AVATAR_DATA_RE = /^data:/i;
-const AVATAR_HTTP_RE = /^https?:\/\//i;
-const COMMUNICATION_SECTION_KEYS = ["channels", "messages", "broadcast", "talk", "audio"] as const;
+const COMMUNICATION_SECTION_KEYS = [
+  "messages",
+  "broadcast",
+  "__notifications__",
+  "talk",
+  "audio",
+  "channels",
+] as const;
 const APPEARANCE_SECTION_KEYS = ["__appearance__", "ui", "wizard"] as const;
 const AUTOMATION_SECTION_KEYS = [
   "commands",
@@ -347,9 +557,16 @@ type ConfigTabOverrides = Pick<
       ConfigProps,
       | "showModeToggle"
       | "navRootLabel"
+      | "showRootTab"
       | "includeSections"
       | "excludeSections"
       | "includeVirtualSections"
+      | "settingsLayout"
+      | "onBackToQuick"
+      | "webPush"
+      | "onWebPushSubscribe"
+      | "onWebPushUnsubscribe"
+      | "onWebPushTest"
     >
   >;
 
@@ -382,6 +599,46 @@ function normalizeScopedConfigSelection(
   return { activeSection, activeSubsection };
 }
 
+function countScopedTopLevelSchemaProperties(
+  schema: unknown,
+  includeSections?: readonly string[],
+  excludeSections?: readonly string[],
+): number {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return 0;
+  }
+  const properties = (schema as { properties?: unknown }).properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+    return 0;
+  }
+  const include = includeSections?.length ? new Set(includeSections) : null;
+  const exclude = excludeSections?.length ? new Set(excludeSections) : null;
+  return Object.keys(properties).filter((key) => {
+    if (include && !include.has(key)) {
+      return false;
+    }
+    if (exclude?.has(key)) {
+      return false;
+    }
+    return true;
+  }).length;
+}
+
+function renderMeasured<T>(
+  state: AppViewState,
+  surface: string,
+  payload: Record<string, unknown>,
+  render: () => T,
+): T {
+  const startedAtMs = controlUiNowMs();
+  const result = render();
+  recordControlUiRenderTiming(state, surface, {
+    ...payload,
+    durationMs: roundedControlUiDurationMs(controlUiNowMs() - startedAtMs),
+  });
+  return result;
+}
+
 function resolveAssistantAvatarUrl(state: AppViewState): string | undefined {
   const list = state.agentsList?.agents ?? [];
   const parsed = parseAgentSessionKey(state.sessionKey);
@@ -392,10 +649,253 @@ function resolveAssistantAvatarUrl(state: AppViewState): string | undefined {
   if (!candidate) {
     return undefined;
   }
-  if (AVATAR_DATA_RE.test(candidate) || AVATAR_HTTP_RE.test(candidate)) {
+  if (isRenderableControlUiAvatarUrl(candidate)) {
     return candidate;
   }
-  return identity?.avatarUrl;
+  return undefined;
+}
+
+function resolveAssistantAvatarOverride(config: unknown): string | null {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    return null;
+  }
+  const ui = (config as { ui?: unknown }).ui;
+  if (!ui || typeof ui !== "object" || Array.isArray(ui)) {
+    return null;
+  }
+  const assistant = (ui as { assistant?: unknown }).assistant;
+  if (!assistant || typeof assistant !== "object" || Array.isArray(assistant)) {
+    return null;
+  }
+  return normalizeOptionalString((assistant as { avatar?: unknown }).avatar) ?? null;
+}
+
+function buildAssistantAvatarRoute(basePathValue: string | null | undefined, agentId: string) {
+  const basePath = normalizeBasePath(basePathValue ?? "");
+  const encoded = encodeURIComponent(agentId);
+  return basePath ? `${basePath}/avatar/${encoded}` : `/avatar/${encoded}`;
+}
+
+// ── Quick Settings data extraction helpers ──
+
+const KNOWN_CHANNEL_IDS = [
+  { id: "telegram", label: "Telegram" },
+  { id: "discord", label: "Discord" },
+  { id: "slack", label: "Slack" },
+  { id: "whatsapp", label: "WhatsApp" },
+  { id: "signal", label: "Signal" },
+  { id: "imessage", label: "iMessage" },
+] as const;
+
+function formatQuickSettingsLabel(id: string): string {
+  const trimmed = id.trim();
+  if (!trimmed) {
+    return "Unknown";
+  }
+  return trimmed
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function extractQuickSettingsChannels(state: AppViewState): QuickSettingsChannel[] {
+  const config = state.configForm ?? state.configSnapshot?.config;
+  if (!config || typeof config !== "object") {
+    return [];
+  }
+  const channelsConfig =
+    "channels" in config && config.channels && typeof config.channels === "object"
+      ? (config.channels as Record<string, unknown>)
+      : {};
+  const configuredIds = Object.keys(channelsConfig).filter((id) => id.trim().length > 0);
+  const channelIds =
+    configuredIds.length > 0
+      ? configuredIds.toSorted((a, b) => a.localeCompare(b))
+      : KNOWN_CHANNEL_IDS.map(({ id }) => id);
+  const knownLabels = new Map<string, string>(
+    KNOWN_CHANNEL_IDS.map(({ id, label }) => [id, label]),
+  );
+  const channels: QuickSettingsChannel[] = [];
+  for (const id of channelIds) {
+    const channelConfig = channelsConfig[id];
+    const hasConfig =
+      channelConfig != null &&
+      typeof channelConfig === "object" &&
+      Object.keys(channelConfig).length > 0;
+    channels.push({
+      id,
+      label: knownLabels.get(id) ?? formatQuickSettingsLabel(id),
+      connected: hasConfig,
+      detail: hasConfig ? "Configured" : undefined,
+    });
+  }
+  return channels;
+}
+
+function extractMcpServerCount(state: AppViewState): number {
+  const config = state.configForm ?? state.configSnapshot?.config;
+  if (!config || typeof config !== "object") {
+    return 0;
+  }
+  const mcp = config.mcp;
+  if (!mcp || typeof mcp !== "object") {
+    return 0;
+  }
+  const servers =
+    "servers" in mcp && mcp.servers && typeof mcp.servers === "object"
+      ? (mcp.servers as Record<string, unknown>)
+      : {};
+  return Object.keys(servers).length;
+}
+
+export function extractQuickSettingsSecurity(state: AppViewState): {
+  gatewayAuth: string;
+  execPolicy: string;
+  deviceAuth: boolean;
+  browserEnabled: boolean;
+  toolProfile: string;
+} {
+  const config = state.configForm ?? state.configSnapshot?.config;
+  if (!config || typeof config !== "object") {
+    return {
+      gatewayAuth: "unknown",
+      execPolicy: "unknown",
+      deviceAuth: false,
+      browserEnabled: true,
+      toolProfile: "full",
+    };
+  }
+  const cfg = config;
+  const gateway =
+    "gateway" in cfg && cfg.gateway && typeof cfg.gateway === "object"
+      ? (cfg.gateway as Record<string, unknown>)
+      : null;
+  const auth =
+    gateway && "auth" in gateway && gateway.auth && typeof gateway.auth === "object"
+      ? (gateway.auth as Record<string, unknown>)
+      : null;
+  let gatewayAuth = "unknown";
+  if (auth) {
+    const mode = typeof auth.mode === "string" ? auth.mode.trim() : "";
+    if (mode) {
+      gatewayAuth = mode;
+    } else if (auth.password) {
+      gatewayAuth = "password";
+    } else if (auth.token) {
+      gatewayAuth = "token";
+    } else if (auth.trustedProxy) {
+      gatewayAuth = "trusted-proxy";
+    } else {
+      gatewayAuth = "none";
+    }
+  }
+  let execPolicy = "allowlist";
+  let toolProfile = "full";
+  const tools = cfg.tools;
+  if (tools && typeof tools === "object") {
+    const profile = (tools as Record<string, unknown>).profile;
+    if (typeof profile === "string") {
+      const trimmedProfile = profile.trim();
+      if (trimmedProfile) {
+        toolProfile = trimmedProfile;
+      }
+    }
+    const exec = (tools as Record<string, unknown>).exec;
+    if (exec && typeof exec === "object") {
+      const security = (exec as Record<string, unknown>).security;
+      if (typeof security === "string") {
+        const trimmedSecurity = security.trim();
+        if (trimmedSecurity) {
+          execPolicy = trimmedSecurity;
+        }
+      }
+    }
+  }
+  let browserEnabled = true;
+  const browser =
+    "browser" in cfg && cfg.browser && typeof cfg.browser === "object"
+      ? (cfg.browser as Record<string, unknown>)
+      : null;
+  if (browser && typeof browser.enabled === "boolean") {
+    browserEnabled = browser.enabled;
+  }
+  let deviceAuth = true;
+  if (gateway) {
+    const controlUi =
+      "controlUi" in gateway && gateway.controlUi && typeof gateway.controlUi === "object"
+        ? (gateway.controlUi as Record<string, unknown>)
+        : null;
+    if (controlUi?.dangerouslyDisableDeviceAuth === true) {
+      deviceAuth = false;
+    }
+  }
+  return { gatewayAuth, execPolicy, deviceAuth, browserEnabled, toolProfile };
+}
+
+function resolveQuickSettingsSessionRow(state: AppViewState) {
+  return state.sessionsResult?.sessions?.find((row) => row.key === state.sessionKey);
+}
+
+function renderCronQuickCreateForTab(
+  state: AppViewState,
+  requestHostUpdate: (() => void) | undefined,
+) {
+  return renderCronQuickCreate({
+    open: state.cronQuickCreateOpen,
+    step: state.cronQuickCreateStep,
+    draft: state.cronQuickCreateDraft ?? createDefaultDraft(),
+    onDraftChange: (patch) => {
+      state.cronQuickCreateDraft = {
+        ...(state.cronQuickCreateDraft ?? createDefaultDraft()),
+        ...patch,
+      };
+      requestHostUpdate?.();
+    },
+    onStepChange: (step) => {
+      state.cronQuickCreateStep = step;
+      requestHostUpdate?.();
+    },
+    onCreate: () => {
+      const draft = state.cronQuickCreateDraft ?? createDefaultDraft();
+      const formPatch = draftToCronFormPatch(draft);
+      state.cronEditingJobId = null;
+      state.cronForm = { ...DEFAULT_CRON_FORM, ...formPatch } as typeof state.cronForm;
+      requestHostUpdate?.();
+      void (async () => {
+        const saved = await addCronJob(state);
+        if (!saved) {
+          requestHostUpdate?.();
+          return;
+        }
+        state.cronQuickCreateOpen = false;
+        state.cronQuickCreateStep = "what";
+        state.cronQuickCreateDraft = null;
+        requestHostUpdate?.();
+      })();
+    },
+    onAdvancedCreate: () => {
+      const draft = state.cronQuickCreateDraft ?? createDefaultDraft();
+      const formPatch = draftToCronFormPatch(draft);
+      state.cronEditingJobId = null;
+      state.cronForm = normalizeCronFormState({
+        ...DEFAULT_CRON_FORM,
+        ...formPatch,
+      } as typeof state.cronForm);
+      state.cronFieldErrors = validateCronForm(state.cronForm);
+      state.cronQuickCreateOpen = false;
+      state.cronQuickCreateStep = "what";
+      state.cronQuickCreateDraft = null;
+      state.cronFormCollapsed = false;
+      requestHostUpdate?.();
+    },
+    onCancel: () => {
+      state.cronQuickCreateOpen = false;
+      state.cronQuickCreateStep = "what";
+      state.cronQuickCreateDraft = null;
+      requestHostUpdate?.();
+    },
+  });
 }
 
 export function renderApp(state: AppViewState) {
@@ -404,7 +904,7 @@ export function renderApp(state: AppViewState) {
     typeof updatableState.requestUpdate === "function"
       ? () => updatableState.requestUpdate?.()
       : undefined;
-  _pendingUpdate = requestHostUpdate;
+  pendingUpdate = requestHostUpdate;
 
   // Gate: require successful gateway connection before showing the dashboard.
   // The gateway URL confirmation overlay is always rendered so URL-param flows still work.
@@ -418,12 +918,50 @@ export function renderApp(state: AppViewState) {
   const chatDisabledReason = state.connected ? null : t("chat.disconnected");
   const isChat = state.tab === "chat";
   const chatFocus = isChat && (state.settings.chatFocusMode || state.onboarding);
+  const chatHeaderHidden = isChat && (chatFocus || state.chatHeaderControlsHidden);
   const navDrawerOpen = state.navDrawerOpen && !chatFocus && !state.onboarding;
   const navCollapsed = state.settings.navCollapsed && !navDrawerOpen;
+  const dashboardHeaderContext = resolveDashboardHeaderContext(state);
   const showThinking = state.onboarding ? false : state.settings.chatShowThinking;
   const showToolCalls = state.onboarding ? true : state.settings.chatShowToolCalls;
+  const localAssistantAvatarOverride =
+    normalizeOptionalString(loadLocalAssistantIdentity().avatar) ?? null;
   const assistantAvatarUrl = resolveAssistantAvatarUrl(state);
-  const chatAvatarUrl = state.chatAvatarUrl ?? assistantAvatarUrl ?? null;
+  const chatAssistantAvatarStatus = localAssistantAvatarOverride
+    ? "data"
+    : (state.chatAvatarStatus ?? state.assistantAvatarStatus ?? null);
+  const chatAssistantAvatarReason = localAssistantAvatarOverride
+    ? null
+    : (state.chatAvatarReason ?? state.assistantAvatarReason ?? null);
+  const chatAssistantAvatarMissing =
+    chatAssistantAvatarStatus === "none" && chatAssistantAvatarReason === "missing";
+  const effectiveAssistantAvatar =
+    localAssistantAvatarOverride ?? (chatAssistantAvatarMissing ? null : state.assistantAvatar);
+  const chatAvatarUrl =
+    localAssistantAvatarOverride ??
+    state.chatAvatarUrl ??
+    (chatAssistantAvatarMissing ? null : (assistantAvatarUrl ?? null));
+  const configAssistantAvatarStatus = localAssistantAvatarOverride
+    ? "data"
+    : (state.assistantAvatarStatus ?? state.chatAvatarStatus ?? null);
+  const configAssistantAvatarReason = localAssistantAvatarOverride
+    ? null
+    : (state.assistantAvatarReason ?? state.chatAvatarReason ?? null);
+  const configAssistantAvatarSource =
+    localAssistantAvatarOverride ?? state.assistantAvatarSource ?? state.chatAvatarSource ?? null;
+  const configAssistantAvatarMissing =
+    configAssistantAvatarStatus === "none" && configAssistantAvatarReason === "missing";
+  const configAssistantAvatar =
+    localAssistantAvatarOverride ??
+    (configAssistantAvatarMissing || configAssistantAvatarStatus === "local"
+      ? null
+      : state.assistantAvatar);
+  const configAssistantAvatarUrl =
+    localAssistantAvatarOverride ??
+    (configAssistantAvatarStatus === "local" && state.assistantAgentId
+      ? buildAssistantAvatarRoute(state.basePath, state.assistantAgentId)
+      : (state.chatAvatarUrl ??
+        (configAssistantAvatarMissing ? null : (assistantAvatarUrl ?? null))));
   const configValue =
     state.configForm ?? (state.configSnapshot?.config as Record<string, unknown> | null);
   const configuredDreaming = resolveConfiguredDreaming(configValue);
@@ -446,18 +984,18 @@ export function renderApp(state: AppViewState) {
     if (!state.client || !state.connected) {
       return null;
     }
-    const payload = (await state.client.request("wiki.get", {
-      lookup,
-      fromLine: 1,
-      lineCount: 5000,
-    })) as {
+    const payload: {
       title?: unknown;
       path?: unknown;
       content?: unknown;
       updatedAt?: unknown;
       totalLines?: unknown;
       truncated?: unknown;
-    } | null;
+    } | null = await state.client.request("wiki.get", {
+      lookup,
+      fromLine: 1,
+      lineCount: 5000,
+    });
     const title =
       typeof payload?.title === "string" && payload.title.trim() ? payload.title.trim() : lookup;
     const path =
@@ -485,16 +1023,49 @@ export function renderApp(state: AppViewState) {
     };
   };
   const applyDreamingEnabled = (enabled: boolean) => {
-    if (state.dreamingModeSaving || dreamingOn === enabled) {
+    if (
+      state.dreamingModeSaving ||
+      state.dreamingRestartConfirmLoading ||
+      state.dreamingRestartConfirmOpen ||
+      dreamingOn === enabled
+    ) {
+      return;
+    }
+    state.dreamingPendingEnabled = enabled;
+    state.dreamingRestartConfirmOpen = true;
+    state.dreamingStatusError = null;
+  };
+  const cancelDreamingRestart = () => {
+    if (state.dreamingRestartConfirmLoading) {
+      return;
+    }
+    state.dreamingRestartConfirmOpen = false;
+    state.dreamingPendingEnabled = null;
+    state.dreamingStatusError = null;
+  };
+  const confirmDreamingRestart = () => {
+    const enabled = state.dreamingPendingEnabled;
+    if (enabled == null || state.dreamingRestartConfirmLoading) {
       return;
     }
     void (async () => {
-      const updated = await updateDreamingEnabled(state, enabled);
-      if (!updated) {
-        return;
+      state.dreamingRestartConfirmLoading = true;
+      state.dreamingStatusError = null;
+      try {
+        const updated = await updateDreamingEnabled(state, enabled);
+        if (!updated) {
+          if (!state.dreamingStatusError) {
+            state.dreamingStatusError = t("dreaming.restartConfirmation.failed");
+          }
+          return;
+        }
+        await loadConfig(state);
+        await loadDreamingStatus(state);
+        state.dreamingRestartConfirmOpen = false;
+        state.dreamingPendingEnabled = null;
+      } finally {
+        state.dreamingRestartConfirmLoading = false;
       }
-      await loadConfig(state);
-      await loadDreamingStatus(state);
     })();
   };
   const basePath = normalizeBasePath(state.basePath ?? "");
@@ -545,10 +1116,11 @@ export function renderApp(state: AppViewState) {
         ...resolveConfiguredCronModelSuggestions(configValue),
         ...state.cronJobs
           .map((job) => {
-            if (job.payload.kind !== "agentTurn" || typeof job.payload.model !== "string") {
+            const payload = getCronJobPayload(job);
+            if (payload?.kind !== "agentTurn" || typeof payload.model !== "string") {
               return "";
             }
-            return job.payload.model.trim();
+            return payload.model.trim();
           })
           .filter(Boolean),
       ].filter(Boolean),
@@ -597,12 +1169,13 @@ export function renderApp(state: AppViewState) {
     formValue: state.configForm,
     originalValue: state.configFormOriginal,
     onRawChange: (next: string) => {
-      state.configRaw = next;
+      updateConfigRawValue(state, next);
     },
     onRequestUpdate: requestHostUpdate,
     onFormPatch: (path: Array<string | number>, value: unknown) =>
       updateConfigFormValue(state, path, value),
-    onReload: () => loadConfig(state),
+    onReload: () => loadConfig(state, { discardPendingChanges: true }),
+    onReset: () => resetConfigPendingChanges(state),
     onSave: () => saveConfig(state),
     onApply: () => applyConfig(state),
     onUpdate: () => runUpdate(state),
@@ -612,12 +1185,29 @@ export function renderApp(state: AppViewState) {
     themeMode: state.themeMode,
     setTheme: (theme, context) => state.setTheme(theme, context),
     setThemeMode: (mode, context) => state.setThemeMode(mode, context),
+    hasCustomTheme: Boolean(state.settings.customTheme),
+    customThemeLabel: state.settings.customTheme?.label ?? null,
+    customThemeSourceUrl: state.settings.customTheme?.sourceUrl ?? null,
+    customThemeImportUrl: state.customThemeImportUrl,
+    customThemeImportBusy: state.customThemeImportBusy,
+    customThemeImportMessage: state.customThemeImportMessage,
+    customThemeImportExpanded: state.customThemeImportExpanded,
+    customThemeImportFocusToken: state.customThemeImportFocusToken,
+    onCustomThemeImportUrlChange: (next) => state.setCustomThemeImportUrl(next),
+    onOpenCustomThemeImport: () => state.openCustomThemeImport(),
+    onImportCustomTheme: () => void state.importCustomTheme(),
+    onClearCustomTheme: () => state.clearCustomTheme(),
     borderRadius: state.settings.borderRadius,
     setBorderRadius: (value) => state.setBorderRadius(value),
+    textScale: state.settings.textScale ?? 100,
+    setTextScale: (value) => state.setTextScale(value),
     gatewayUrl: state.settings.gatewayUrl,
     assistantName: state.assistantName,
     configPath: state.configSnapshot?.path ?? null,
-    rawAvailable: typeof state.configSnapshot?.raw === "string",
+    rawAvailable:
+      typeof state.configSnapshot?.raw === "string" ||
+      !!state.configSnapshot?.config ||
+      !!state.configForm,
   } satisfies Omit<
     ConfigProps,
     | "formMode"
@@ -634,12 +1224,35 @@ export function renderApp(state: AppViewState) {
     | "excludeSections"
     | "includeVirtualSections"
   >;
-  const renderConfigTab = (overrides: ConfigTabOverrides) =>
-    renderConfig({
-      ...commonConfigProps,
-      includeVirtualSections: false,
-      ...overrides,
-    });
+  const renderConfigTab = (overrides: ConfigTabOverrides) => {
+    const scopedDefaultSection = overrides.includeSections?.[0] ?? null;
+    const activeSection = overrides.activeSection ?? scopedDefaultSection;
+    const showRootTab = overrides.showRootTab ?? !overrides.includeSections?.length;
+    return renderMeasured(
+      state,
+      "config",
+      {
+        tab: state.tab,
+        formMode: overrides.formMode,
+        activeSection,
+        activeSubsection: overrides.activeSubsection,
+        schemaSectionCount: countScopedTopLevelSchemaProperties(
+          commonConfigProps.schema,
+          overrides.includeSections,
+          overrides.excludeSections,
+        ),
+        hasSearch: Boolean(overrides.searchQuery?.trim()),
+      },
+      () =>
+        renderConfig({
+          ...commonConfigProps,
+          includeVirtualSections: false,
+          ...overrides,
+          activeSection,
+          showRootTab,
+        }),
+    );
+  };
   const configSelection = normalizeMainConfigSelection(
     state.configActiveSection,
     state.configActiveSubsection,
@@ -671,7 +1284,161 @@ export function renderApp(state: AppViewState) {
   );
   const renderConfigTabForActiveTab = () => {
     switch (state.tab) {
-      case "config":
+      case "config": {
+        // Quick Settings mode — opinionated card layout
+        if (state.configSettingsMode === "quick") {
+          const configObj = state.configForm ?? state.configSnapshot?.config ?? {};
+          const assistantAvatarOverride =
+            localAssistantAvatarOverride ?? resolveAssistantAvatarOverride(configObj);
+          const agentsDefaults = ((configObj.agents as Record<string, unknown> | undefined)
+            ?.defaults ?? {}) as Record<string, unknown>;
+          const activeSession = resolveQuickSettingsSessionRow(state);
+          const currentModel =
+            typeof activeSession?.model === "string"
+              ? activeSession.model
+              : typeof agentsDefaults.model === "string"
+                ? agentsDefaults.model
+                : "default";
+          const thinkingLevel =
+            typeof activeSession?.thinkingLevel === "string"
+              ? activeSession.thinkingLevel
+              : typeof agentsDefaults.thinkingLevel === "string"
+                ? agentsDefaults.thinkingLevel
+                : "off";
+          const fastMode =
+            typeof activeSession?.fastMode === "boolean"
+              ? activeSession.fastMode
+              : agentsDefaults.fastMode === true;
+          return renderQuickSettings({
+            currentModel,
+            thinkingLevel,
+            fastMode,
+            onModelChange: () => {
+              state.configSettingsMode = "advanced";
+              state.aiAgentsActiveSection = "models";
+              state.setTab("aiAgents");
+            },
+            onThinkingChange: (level) => {
+              void patchSession(state, state.sessionKey, { thinkingLevel: level }).then(() =>
+                requestHostUpdate?.(),
+              );
+            },
+            onFastModeToggle: () => {
+              void patchSession(state, state.sessionKey, { fastMode: !fastMode }).then(() =>
+                requestHostUpdate?.(),
+              );
+            },
+            channels: extractQuickSettingsChannels(state),
+            onChannelConfigure: () => {
+              state.setTab("channels");
+            },
+            automation: {
+              cronJobCount: state.cronJobs?.length ?? 0,
+              skillCount: state.skillsReport?.skills?.length ?? 0,
+              mcpServerCount: extractMcpServerCount(state),
+            },
+            onManageCron: () => {
+              state.setTab("cron");
+            },
+            onBrowseSkills: () => {
+              state.setTab("skills");
+            },
+            onConfigureMcp: () => {
+              state.infrastructureActiveSection = "mcp";
+              state.setTab("infrastructure");
+            },
+            security: extractQuickSettingsSecurity(state),
+            onSecurityConfigure: () => {
+              state.configSettingsMode = "advanced";
+              state.configActiveSection = "auth";
+              requestHostUpdate?.();
+            },
+            onBrowserEnabledToggle: (enabled) => {
+              updateConfigFormValue(state, ["browser", "enabled"], enabled);
+              requestHostUpdate?.();
+            },
+            onToolProfileChange: (profile) => {
+              updateConfigFormValue(state, ["tools", "profile"], profile);
+              requestHostUpdate?.();
+            },
+            theme: state.theme,
+            themeMode: state.themeMode,
+            hasCustomTheme: Boolean(state.settings.customTheme),
+            customThemeLabel: state.settings.customTheme?.label ?? null,
+            borderRadius: state.settings.borderRadius,
+            textScale: state.settings.textScale ?? 100,
+            setTheme: (theme, context) => state.setTheme(theme, context),
+            onOpenCustomThemeImport: () => {
+              state.setTab("appearance");
+              state.appearanceFormMode = "form";
+              state.appearanceSearchQuery = "";
+              state.appearanceActiveSection = "__appearance__";
+              state.appearanceActiveSubsection = null;
+              state.openCustomThemeImport();
+              requestHostUpdate?.();
+            },
+            setThemeMode: (mode, context) => state.setThemeMode(mode, context),
+            setBorderRadius: (value) => state.setBorderRadius(value),
+            setTextScale: (value) => state.setTextScale(value),
+            userAvatar: state.userAvatar ?? null,
+            onUserAvatarChange: (avatar) => state.applyLocalUserIdentity?.({ avatar }),
+            assistantAvatar: configAssistantAvatar,
+            assistantAvatarUrl: configAssistantAvatarUrl,
+            assistantAvatarSource: configAssistantAvatarSource,
+            assistantAvatarStatus: configAssistantAvatarStatus,
+            assistantAvatarReason: configAssistantAvatarReason,
+            assistantAvatarOverride,
+            assistantAvatarUploadBusy: state.assistantAvatarUploadBusy,
+            assistantAvatarUploadError: state.assistantAvatarUploadError,
+            onAssistantAvatarOverrideChange: (dataUrl) => {
+              setAssistantAvatarOverride(state, dataUrl);
+              state.chatAvatarUrl = dataUrl;
+              state.chatAvatarSource = dataUrl;
+              state.chatAvatarStatus = "data";
+              state.chatAvatarReason = null;
+              state.assistantAvatarUploadError = null;
+              requestHostUpdate?.();
+            },
+            onAssistantAvatarClearOverride: () => {
+              setAssistantAvatarOverride(state, null);
+              state.chatAvatarUrl = null;
+              state.chatAvatarSource = null;
+              state.chatAvatarStatus = null;
+              state.chatAvatarReason = null;
+              state.assistantAvatarUploadError = null;
+              void state.loadAssistantIdentity?.().finally(() => requestHostUpdate?.());
+              requestHostUpdate?.();
+            },
+            basePath: state.basePath ?? "",
+            configObject: configObj,
+            savedConfigObject:
+              (state.configSnapshot?.config as Record<string, unknown> | null) ?? {},
+            configDirty: state.configFormDirty,
+            configSaving: state.configSaving,
+            configApplying: state.configApplying,
+            configReady: Boolean(state.configSnapshot?.hash),
+            onSelectPreset: (presetId) => {
+              const preset = getPresetById(presetId);
+              if (!preset) {
+                return;
+              }
+              stageConfigPreset(state, preset.patch);
+              requestHostUpdate?.();
+            },
+            onResetConfig: () => resetConfigPendingChanges(state),
+            onSaveConfig: () => saveConfig(state),
+            onApplyConfig: () => applyConfig(state),
+            onAdvancedSettings: () => {
+              state.configSettingsMode = "advanced";
+              requestHostUpdate?.();
+            },
+            connected: state.connected,
+            gatewayUrl: state.settings.gatewayUrl,
+            assistantName: state.assistantName,
+            version: state.hello?.server?.version ?? "",
+          });
+        }
+        // Advanced mode — full config form with accordion groups
         return renderConfigTab({
           formMode: state.configFormMode,
           searchQuery: state.configSearchQuery,
@@ -685,6 +1452,11 @@ export function renderApp(state: AppViewState) {
           },
           onSubsectionChange: (section) => (state.configActiveSubsection = section),
           showModeToggle: true,
+          settingsLayout: "accordion",
+          onBackToQuick: () => {
+            state.configSettingsMode = "quick";
+            requestHostUpdate?.();
+          },
           excludeSections: [
             ...COMMUNICATION_SECTION_KEYS,
             ...AUTOMATION_SECTION_KEYS,
@@ -694,6 +1466,44 @@ export function renderApp(state: AppViewState) {
             "wizard",
           ],
         });
+      }
+      case "channels":
+        return renderLazyView(lazyChannels, (m) =>
+          m.renderChannels({
+            connected: state.connected,
+            loading: state.channelsLoading,
+            snapshot: state.channelsSnapshot,
+            lastError: state.channelsError,
+            lastSuccessAt: state.channelsLastSuccess,
+            whatsappMessage: state.whatsappLoginMessage,
+            whatsappQrDataUrl: state.whatsappLoginQrDataUrl,
+            whatsappConnected: state.whatsappLoginConnected,
+            whatsappBusy: state.whatsappBusy,
+            configSchema: state.configSchema,
+            configSchemaLoading: state.configSchemaLoading,
+            configForm: state.configForm,
+            configUiHints: state.configUiHints,
+            configSaving: state.configSaving,
+            configFormDirty: state.configFormDirty,
+            nostrProfileFormState: state.nostrProfileFormState,
+            nostrProfileAccountId: state.nostrProfileAccountId,
+            onRefresh: (probe) => loadChannels(state, probe),
+            onWhatsAppStart: (force) => state.handleWhatsAppStart(force),
+            onWhatsAppWait: () => state.handleWhatsAppWait(),
+            onWhatsAppLogout: () => state.handleWhatsAppLogout(),
+            onConfigPatch: (path, value) => updateConfigFormValue(state, path, value),
+            onConfigSave: () => state.handleChannelConfigSave(),
+            onConfigReload: () => state.handleChannelConfigReload(),
+            onNostrProfileEdit: (accountId, profile) =>
+              state.handleNostrProfileEdit(accountId, profile),
+            onNostrProfileCancel: () => state.handleNostrProfileCancel(),
+            onNostrProfileFieldChange: (field, value) =>
+              state.handleNostrProfileFieldChange(field, value),
+            onNostrProfileSave: () => state.handleNostrProfileSave(),
+            onNostrProfileImport: () => state.handleNostrProfileImport(),
+            onNostrProfileToggleAdvanced: () => state.handleNostrProfileToggleAdvanced(),
+          }),
+        );
       case "communications":
         return renderConfigTab({
           formMode: state.communicationsFormMode,
@@ -709,6 +1519,16 @@ export function renderApp(state: AppViewState) {
           onSubsectionChange: (section) => (state.communicationsActiveSubsection = section),
           navRootLabel: "Communication",
           includeSections: [...COMMUNICATION_SECTION_KEYS],
+          includeVirtualSections: true,
+          webPush: {
+            supported: state.webPushSupported,
+            permission: state.webPushPermission,
+            subscribed: state.webPushSubscribed,
+            loading: state.webPushLoading,
+          },
+          onWebPushSubscribe: () => state.handleWebPushSubscribe(),
+          onWebPushUnsubscribe: () => state.handleWebPushUnsubscribe(),
+          onWebPushTest: () => state.handleWebPushTest(),
         });
       case "appearance":
         return renderConfigTab({
@@ -794,6 +1614,10 @@ export function renderApp(state: AppViewState) {
         void loadToolsCatalog(state, agentId);
         void refreshVisibleToolsEffectiveForCurrentSession(state);
         return;
+      case "overview":
+      case "channels":
+      case "cron":
+        return;
     }
   };
   const refreshAgentsPanelSupplementalData = (panel: AppViewState["agentsPanel"]) => {
@@ -845,7 +1669,7 @@ export function renderApp(state: AppViewState) {
       },
       onSlashCommand: (cmd) => {
         state.setTab("chat" as import("./navigation.ts").Tab);
-        state.chatMessage = cmd.endsWith(" ") ? cmd : `${cmd} `;
+        state.handleChatDraftChange(cmd.endsWith(" ") ? cmd : `${cmd} `);
       },
     })}
     <div
@@ -854,6 +1678,9 @@ export function renderApp(state: AppViewState) {
         : ""} ${navCollapsed ? "shell--nav-collapsed" : ""} ${navDrawerOpen
         ? "shell--nav-drawer-open"
         : ""} ${state.onboarding ? "shell--onboarding" : ""}"
+      style=${styleMap(
+        state.chatMessageMaxWidth ? { "--chat-message-max-width": state.chatMessageMaxWidth } : {},
+      )}
     >
       <button
         type="button"
@@ -863,11 +1690,11 @@ export function renderApp(state: AppViewState) {
           state.navDrawerOpen = false;
         }}
       ></button>
-      <header class="topbar">
+      <header class="topbar" ?inert=${chatFocus} aria-hidden=${chatFocus ? "true" : nothing}>
         <div class="topnav-shell">
           <button
             type="button"
-            class="topbar-nav-toggle"
+            class="sidebar-menu-trigger topbar-nav-toggle"
             @click=${() => {
               state.navDrawerOpen = !navDrawerOpen;
             }}
@@ -878,7 +1705,14 @@ export function renderApp(state: AppViewState) {
             <span class="nav-collapse-toggle__icon" aria-hidden="true">${icons.menu}</span>
           </button>
           <div class="topnav-shell__content">
-            <dashboard-header .tab=${state.tab}></dashboard-header>
+            <dashboard-header
+              .tab=${state.tab}
+              .basePath=${state.basePath}
+              .agentLabel=${dashboardHeaderContext.agentLabel}
+              @navigate=${(event: CustomEvent<Tab>) => {
+                state.setTab(event.detail);
+              }}
+            ></dashboard-header>
           </div>
           <div class="topnav-shell__actions">
             <button
@@ -886,8 +1720,8 @@ export function renderApp(state: AppViewState) {
               @click=${() => {
                 state.paletteOpen = !state.paletteOpen;
               }}
-              title="Search or jump to… (⌘K)"
-              aria-label="Open command palette"
+              title=${t("chat.commandPaletteTitle")}
+              aria-label=${t("chat.openCommandPalette")}
             >
               <span class="topbar-search__label">${t("common.search")}</span>
               <kbd class="topbar-search__kbd">⌘K</kbd>
@@ -935,11 +1769,11 @@ export function renderApp(state: AppViewState) {
               </button>
             </div>
             <div class="sidebar-shell__body">
+              ${renderSidebarSessions(state)}
               <nav class="sidebar-nav">
                 ${TAB_GROUPS.map((group) => {
                   const isGroupCollapsed = state.settings.navGroupsCollapsed[group.label] ?? false;
-                  const hasActiveTab = group.tabs.some((tab) => tab === state.tab);
-                  const showItems = navCollapsed || hasActiveTab || !isGroupCollapsed;
+                  const showItems = navCollapsed || !isGroupCollapsed;
 
                   return html`
                     <section class="nav-section ${!showItems ? "nav-section--collapsed" : ""}">
@@ -981,7 +1815,7 @@ export function renderApp(state: AppViewState) {
                   href="https://docs.openclaw.ai"
                   target=${EXTERNAL_LINK_TARGET}
                   rel=${buildExternalLinkRel()}
-                  title="${t("common.docs")} (opens in new tab)"
+                  title=${t("chat.docsOpensInNewTab", { label: t("common.docs") })}
                 >
                   <span class="nav-item__icon" aria-hidden="true">${icons.book}</span>
                   ${!navCollapsed
@@ -1013,25 +1847,34 @@ export function renderApp(state: AppViewState) {
           </div>
         </aside>
       </div>
-      <main class="content ${isChat ? "content--chat" : ""}">
+      <main
+        class="content ${isChat ? "content--chat" : ""} ${state.tab === "logs"
+          ? "content--logs"
+          : ""} ${state.tab === "workboard" ? "content--workboard" : ""}"
+      >
+        ${state.updateStatusBanner
+          ? html`<div class="callout ${state.updateStatusBanner.tone}" role="alert">
+              ${state.updateStatusBanner.text}
+            </div>`
+          : nothing}
         ${state.updateAvailable &&
         state.updateAvailable.latestVersion !== state.updateAvailable.currentVersion &&
         !isUpdateBannerDismissed(state.updateAvailable)
           ? html`<div class="update-banner callout danger" role="alert">
-              <strong>Update available:</strong> v${state.updateAvailable.latestVersion} (running
-              v${state.updateAvailable.currentVersion}).
+              <strong>${t("chat.updateAvailable")}</strong> v${state.updateAvailable.latestVersion}
+              (${t("chat.runningVersion", { version: state.updateAvailable.currentVersion })}).
               <button
                 class="btn btn--sm update-banner__btn"
                 ?disabled=${state.updateRunning || !state.connected}
                 @click=${() => runUpdate(state)}
               >
-                ${state.updateRunning ? "Updating…" : "Update now"}
+                ${state.updateRunning ? t("chat.updating") : t("chat.updateNow")}
               </button>
               <button
                 class="update-banner__close"
                 type="button"
-                title="Dismiss"
-                aria-label="Dismiss update banner"
+                title=${t("common.dismiss")}
+                aria-label=${t("chat.dismissUpdateBanner")}
                 @click=${() => {
                   dismissUpdateBanner(state.updateAvailable);
                   state.updateAvailable = null;
@@ -1043,7 +1886,13 @@ export function renderApp(state: AppViewState) {
           : nothing}
         ${state.tab === "config"
           ? nothing
-          : html`<section class="content-header">
+          : html`<section
+              class=${chatHeaderHidden
+                ? "content-header content-header--chat-hidden"
+                : "content-header"}
+              ?inert=${chatHeaderHidden}
+              aria-hidden=${chatHeaderHidden ? "true" : nothing}
+            >
               <div>
                 ${isChat
                   ? renderChatSessionSelect(state)
@@ -1112,19 +1961,7 @@ export function renderApp(state: AppViewState) {
               onSettingsChange: (next) => state.applySettings(next),
               onPasswordChange: (next) => (state.password = next),
               onSessionKeyChange: (next) => {
-                state.sessionKey = next;
-                state.chatMessage = "";
-                state.chatMessages = [];
-                state.chatToolMessages = [];
-                state.chatStream = null;
-                state.chatRunId = null;
-                state.chatQueue = [];
-                state.resetToolStream();
-                state.applySettings({
-                  ...state.settings,
-                  sessionKey: next,
-                  lastActiveSessionKey: next,
-                });
+                switchChatSession(state, next);
               },
               onToggleGatewayTokenVisibility: () => {
                 state.overviewShowGatewayToken = !state.overviewShowGatewayToken;
@@ -1138,46 +1975,57 @@ export function renderApp(state: AppViewState) {
               onRefreshLogs: () => state.loadOverview({ refresh: true }),
             })
           : nothing}
-        ${state.tab === "channels"
-          ? lazyRender(lazyChannels, (m) =>
-              m.renderChannels({
-                connected: state.connected,
-                loading: state.channelsLoading,
-                snapshot: state.channelsSnapshot,
-                lastError: state.channelsError,
-                lastSuccessAt: state.channelsLastSuccess,
-                whatsappMessage: state.whatsappLoginMessage,
-                whatsappQrDataUrl: state.whatsappLoginQrDataUrl,
-                whatsappConnected: state.whatsappLoginConnected,
-                whatsappBusy: state.whatsappBusy,
-                configSchema: state.configSchema,
-                configSchemaLoading: state.configSchemaLoading,
-                configForm: state.configForm,
-                configUiHints: state.configUiHints,
-                configSaving: state.configSaving,
-                configFormDirty: state.configFormDirty,
-                nostrProfileFormState: state.nostrProfileFormState,
-                nostrProfileAccountId: state.nostrProfileAccountId,
-                onRefresh: (probe) => loadChannels(state, probe),
-                onWhatsAppStart: (force) => state.handleWhatsAppStart(force),
-                onWhatsAppWait: () => state.handleWhatsAppWait(),
-                onWhatsAppLogout: () => state.handleWhatsAppLogout(),
-                onConfigPatch: (path, value) => updateConfigFormValue(state, path, value),
-                onConfigSave: () => state.handleChannelConfigSave(),
-                onConfigReload: () => state.handleChannelConfigReload(),
-                onNostrProfileEdit: (accountId, profile) =>
-                  state.handleNostrProfileEdit(accountId, profile),
-                onNostrProfileCancel: () => state.handleNostrProfileCancel(),
-                onNostrProfileFieldChange: (field, value) =>
-                  state.handleNostrProfileFieldChange(field, value),
-                onNostrProfileSave: () => state.handleNostrProfileSave(),
-                onNostrProfileImport: () => state.handleNostrProfileImport(),
-                onNostrProfileToggleAdvanced: () => state.handleNostrProfileToggleAdvanced(),
+        ${state.tab === "activity"
+          ? renderLazyView(lazyActivity, (m) =>
+              m.renderActivity({
+                entries: state.activityEntries,
+                filterText: state.activityFilterText,
+                statusFilters: state.activityStatusFilters,
+                toolFilter: state.activityToolFilter,
+                expandedIds: state.activityExpandedIds,
+                autoFollow: state.activityAutoFollow,
+                onFilterTextChange: (next) => (state.activityFilterText = next),
+                onToolFilterChange: (next) => (state.activityToolFilter = next),
+                onStatusToggle: (status, enabled) => {
+                  state.activityStatusFilters = {
+                    ...state.activityStatusFilters,
+                    [status]: enabled,
+                  };
+                },
+                onToggleAutoFollow: (next) => {
+                  state.activityAutoFollow = next;
+                  if (next) {
+                    state.scheduleActivityScroll(true);
+                  }
+                },
+                onClear: () => {
+                  state.activityEntries = [];
+                  state.activityExpandedIds = new Set();
+                  state.activityAtBottom = true;
+                },
+                onExpandAll: () => {
+                  state.activityExpandedIds = new Set(
+                    state.activityEntries.map((entry) => entry.id),
+                  );
+                },
+                onCollapseAll: () => {
+                  state.activityExpandedIds = new Set();
+                },
+                onEntryToggle: (id, open) => {
+                  const next = new Set(state.activityExpandedIds);
+                  if (open) {
+                    next.add(id);
+                  } else {
+                    next.delete(id);
+                  }
+                  state.activityExpandedIds = next;
+                },
+                onScroll: (event) => state.handleActivityScroll(event),
               }),
             )
           : nothing}
         ${state.tab === "instances"
-          ? lazyRender(lazyInstances, (m) =>
+          ? renderLazyView(lazyInstances, (m) =>
               m.renderInstances({
                 loading: state.presenceLoading,
                 entries: state.presenceEntries,
@@ -1188,8 +2036,20 @@ export function renderApp(state: AppViewState) {
             )
           : nothing}
         ${state.tab === "sessions"
-          ? lazyRender(lazySessions, (m) =>
-              m.renderSessions({
+          ? renderLazyView(lazySessions, (m) => {
+              const workboardState = getWorkboardState(state);
+              const workboardEnabled = isPluginEnabledInConfigSnapshot(
+                state.configSnapshot,
+                "workboard",
+                {
+                  enabledByDefault: false,
+                },
+              );
+              const operatorCanWrite = hasOperatorWriteAccess(
+                (state.hello as { auth?: { role?: string; scopes?: string[] } } | null)?.auth ??
+                  null,
+              );
+              return m.renderSessions({
                 loading: state.sessionsLoading,
                 result: state.sessionsResult,
                 error: state.sessionsError,
@@ -1197,13 +2057,22 @@ export function renderApp(state: AppViewState) {
                 limit: state.sessionsFilterLimit,
                 includeGlobal: state.sessionsIncludeGlobal,
                 includeUnknown: state.sessionsIncludeUnknown,
+                showArchived: state.sessionsShowArchived,
+                filtersCollapsed: state.sessionsFiltersCollapsed,
                 basePath: state.basePath,
                 searchQuery: state.sessionsSearchQuery,
+                agentIdentityById: state.agentIdentityById,
                 sortColumn: state.sessionsSortColumn,
                 sortDir: state.sessionsSortDir,
                 page: state.sessionsPage,
                 pageSize: state.sessionsPageSize,
                 selectedKeys: state.sessionsSelectedKeys,
+                workboardSessionKeys: new Set(
+                  workboardState.cards
+                    .flatMap((card) => [card.sessionKey, card.execution?.sessionKey])
+                    .filter((key): key is string => typeof key === "string" && key.length > 0),
+                ),
+                workboardBusySessionKey: [...workboardState.capturingSessionKeys][0] ?? null,
                 expandedCheckpointKey: state.sessionsExpandedCheckpointKey,
                 checkpointItemsByKey: state.sessionsCheckpointItemsByKey,
                 checkpointLoadingKey: state.sessionsCheckpointLoadingKey,
@@ -1214,6 +2083,36 @@ export function renderApp(state: AppViewState) {
                   state.sessionsFilterLimit = next.limit;
                   state.sessionsIncludeGlobal = next.includeGlobal;
                   state.sessionsIncludeUnknown = next.includeUnknown;
+                  state.sessionsShowArchived = next.showArchived;
+                  state.sessionsSelectedKeys = new Set();
+                  state.sessionsPage = 0;
+                  void loadSessions(state, {
+                    activeMinutes: parseSessionsFilterInteger(next.activeMinutes),
+                    limit: parseSessionsFilterInteger(next.limit),
+                    includeGlobal: next.includeGlobal,
+                    includeUnknown: next.includeUnknown,
+                    showArchived: next.showArchived,
+                  });
+                },
+                onToggleFiltersCollapsed: () => {
+                  state.sessionsFiltersCollapsed = !state.sessionsFiltersCollapsed;
+                },
+                onClearFilters: () => {
+                  state.sessionsFilterActive = "";
+                  state.sessionsFilterLimit = "";
+                  state.sessionsIncludeGlobal = true;
+                  state.sessionsIncludeUnknown = true;
+                  state.sessionsShowArchived = true;
+                  state.sessionsSearchQuery = "";
+                  state.sessionsSelectedKeys = new Set();
+                  state.sessionsPage = 0;
+                  void loadSessions(state, {
+                    activeMinutes: 0,
+                    limit: 0,
+                    includeGlobal: true,
+                    includeUnknown: true,
+                    showArchived: true,
+                  });
                 },
                 onSearchChange: (q) => {
                   state.sessionsSearchQuery = q;
@@ -1274,6 +2173,18 @@ export function renderApp(state: AppViewState) {
                   switchChatSession(state, sessionKey);
                   state.setTab("chat" as import("./navigation.ts").Tab);
                 },
+                onAddToWorkboard:
+                  workboardEnabled && operatorCanWrite
+                    ? async (session) => {
+                        await captureSessionToWorkboard({
+                          host: state,
+                          client: state.client,
+                          session,
+                          requestUpdate: requestHostUpdate,
+                        });
+                        state.setTab("workboard" as import("./navigation.ts").Tab);
+                      }
+                    : undefined,
                 onToggleCheckpointDetails: (sessionKey) =>
                   toggleSessionCompactionCheckpoints(state, sessionKey),
                 onBranchFromCheckpoint: async (sessionKey, checkpointId) => {
@@ -1289,12 +2200,36 @@ export function renderApp(state: AppViewState) {
                 },
                 onRestoreCheckpoint: (sessionKey, checkpointId) =>
                   restoreSessionFromCheckpoint(state, sessionKey, checkpointId),
+              });
+            })
+          : nothing}
+        ${state.tab === "workboard"
+          ? renderLazyView(lazyWorkboard, (m) =>
+              m.renderWorkboard({
+                host: state,
+                client: state.client,
+                connected: state.connected,
+                canWrite: hasOperatorWriteAccess(
+                  (state.hello as { auth?: { role?: string; scopes?: string[] } } | null)?.auth ??
+                    null,
+                ),
+                pluginEnabled: isPluginEnabledInConfigSnapshot(state.configSnapshot, "workboard", {
+                  enabledByDefault: false,
+                }),
+                agentsList: state.agentsList,
+                sessions: state.sessionsResult?.sessions ?? [],
+                onOpenSession: (sessionKey) => {
+                  switchChatSession(state, sessionKey);
+                  state.setTab("chat" as import("./navigation.ts").Tab);
+                },
+                onRequestUpdate: requestHostUpdate,
               }),
             )
           : nothing}
         ${renderUsageTab(state)}
+        ${state.tab === "cron" ? renderCronQuickCreateForTab(state, requestHostUpdate) : nothing}
         ${state.tab === "cron"
-          ? lazyRender(lazyCron, (m) =>
+          ? renderLazyView(lazyCron, (m) =>
               m.renderCron({
                 basePath: state.basePath,
                 loading: state.cronLoading,
@@ -1313,6 +2248,7 @@ export function renderApp(state: AppViewState) {
                 error: state.cronError,
                 busy: state.cronBusy,
                 form: state.cronForm,
+                cronFormCollapsed: state.cronFormCollapsed,
                 channels: state.channelsSnapshot?.channelMeta?.length
                   ? state.channelsSnapshot.channelMeta.map((entry) => entry.id)
                   : (state.channelsSnapshot?.channelOrder ?? []),
@@ -1342,27 +2278,57 @@ export function renderApp(state: AppViewState) {
                   state.cronFieldErrors = validateCronForm(state.cronForm);
                 },
                 onRefresh: () => state.loadCron(),
-                onAdd: () => addCronJob(state),
-                onEdit: (job) => startCronEdit(state, job),
-                onClone: (job) => startCronClone(state, job),
-                onCancelEdit: () => cancelCronEdit(state),
+                onAdd: () => {
+                  void (async () => {
+                    const saved = await addCronJob(state);
+                    if (saved) {
+                      state.cronFormCollapsed = true;
+                    }
+                    requestHostUpdate?.();
+                  })();
+                },
+                onEdit: (job) => {
+                  state.cronFormCollapsed = false;
+                  startCronEdit(state, job);
+                },
+                onClone: (job) => {
+                  state.cronFormCollapsed = false;
+                  startCronClone(state, job);
+                },
+                onCancelEdit: () => {
+                  cancelCronEdit(state);
+                  state.cronFormCollapsed = true;
+                  requestHostUpdate?.();
+                },
+                onToggleFormCollapsed: (collapsed) => {
+                  state.cronFormCollapsed = collapsed;
+                  requestHostUpdate?.();
+                },
                 onToggle: (job, enabled) => toggleCronJob(state, job, enabled),
                 onRun: (job, mode) => runCronJob(state, job, mode ?? "force"),
                 onRemove: (job) => removeCronJob(state, job),
+                onQuickCreate: () => {
+                  state.cronQuickCreateOpen = true;
+                  state.cronQuickCreateStep = "what";
+                  state.cronQuickCreateDraft = createDefaultDraft();
+                  requestHostUpdate?.();
+                },
                 onLoadRuns: async (jobId) => {
                   updateCronRunsFilter(state, { cronRunsScope: "job" });
                   await loadCronRuns(state, jobId);
                 },
-                onLoadMoreJobs: () => loadCronJobsPage(state, { append: true }),
+                onLoadMoreJobs: () => loadCronJobsPage(state, { append: true, tableFilters: true }),
                 onJobsFiltersChange: async (patch) => {
                   updateCronJobsFilter(state, patch);
                   const shouldReload =
                     typeof patch.cronJobsQuery === "string" ||
                     Boolean(patch.cronJobsEnabledFilter) ||
+                    Boolean(patch.cronJobsScheduleKindFilter) ||
+                    Boolean(patch.cronJobsLastStatusFilter) ||
                     Boolean(patch.cronJobsSortBy) ||
                     Boolean(patch.cronJobsSortDir);
                   if (shouldReload) {
-                    await loadCronJobsPage(state, { append: false });
+                    await loadCronJobsPage(state, { append: false, tableFilters: true });
                   }
                 },
                 onJobsFiltersReset: async () => {
@@ -1374,7 +2340,7 @@ export function renderApp(state: AppViewState) {
                     cronJobsSortBy: "nextRunAtMs",
                     cronJobsSortDir: "asc",
                   });
-                  await loadCronJobsPage(state, { append: false });
+                  await loadCronJobsPage(state, { append: false, tableFilters: true });
                 },
                 onLoadMoreRuns: () => loadMoreCronRuns(state),
                 onRunsFiltersChange: async (patch) => {
@@ -1393,7 +2359,7 @@ export function renderApp(state: AppViewState) {
             )
           : nothing}
         ${state.tab === "agents"
-          ? lazyRender(lazyAgents, (m) =>
+          ? renderLazyView(lazyAgents, (m) =>
               m.renderAgents({
                 basePath: state.basePath ?? "",
                 loading: state.agentsLoading,
@@ -1565,7 +2531,7 @@ export function renderApp(state: AppViewState) {
                     removeConfigFormValue(state, [...basePath, "deny"]);
                   }
                 },
-                onConfigReload: () => loadConfig(state),
+                onConfigReload: () => loadConfig(state, { discardPendingChanges: true }),
                 onConfigSave: () => saveAgentsConfig(state),
                 onChannelsRefresh: () => loadChannels(state, false),
                 onCronRefresh: () => state.loadCron(),
@@ -1600,7 +2566,7 @@ export function renderApp(state: AppViewState) {
                     state.agentSkillsReport?.skills?.map((skill) => skill.name).filter(Boolean) ??
                     [];
                   const existing = Array.isArray(entry?.skills)
-                    ? entry.skills.map((name) => String(name).trim()).filter(Boolean)
+                    ? normalizeStringEntries(entry.skills)
                     : undefined;
                   const base = existing ?? allSkills;
                   const next = new Set(base);
@@ -1649,7 +2615,7 @@ export function renderApp(state: AppViewState) {
                   void refreshVisibleToolsEffectiveForCurrentSession(state);
                 },
                 onModelFallbacksChange: (agentId, fallbacks) => {
-                  const normalized = fallbacks.map((name) => name.trim()).filter(Boolean);
+                  const normalized = normalizeStringEntries(fallbacks);
                   const currentConfig = getCurrentConfigValue();
                   const resolvedConfig = resolveAgentConfig(currentConfig, agentId);
                   const effectivePrimary =
@@ -1699,16 +2665,13 @@ export function renderApp(state: AppViewState) {
                   updateConfigFormValue(state, basePath, { primary, fallbacks: normalized });
                 },
                 onSetDefault: (agentId) => {
-                  if (!configValue) {
-                    return;
-                  }
-                  updateConfigFormValue(state, ["agents", "defaultId"], agentId);
+                  stageDefaultAgentConfigEntry(state, agentId);
                 },
               }),
             )
           : nothing}
         ${state.tab === "skills"
-          ? lazyRender(lazySkills, (m) =>
+          ? renderLazyView(lazySkills, (m) =>
               m.renderSkills({
                 connected: state.connected,
                 loading: state.skillsLoading,
@@ -1720,6 +2683,13 @@ export function renderApp(state: AppViewState) {
                 messages: state.skillMessages,
                 busyKey: state.skillsBusyKey,
                 detailKey: state.skillsDetailKey,
+                detailTab: state.skillsDetailTab,
+                clawhubVerdicts: state.clawhubVerdicts,
+                clawhubVerdictsLoading: state.clawhubVerdictsLoading,
+                clawhubVerdictsError: state.clawhubVerdictsError,
+                skillCardContents: state.skillCardContents,
+                skillCardLoadingKey: state.skillCardLoadingKey,
+                skillCardErrors: state.skillCardErrors,
                 clawhubQuery: state.clawhubSearchQuery,
                 clawhubResults: state.clawhubSearchResults,
                 clawhubSearchLoading: state.clawhubSearchLoading,
@@ -1738,8 +2708,17 @@ export function renderApp(state: AppViewState) {
                 onSaveKey: (key) => saveSkillApiKey(state, key),
                 onInstall: (skillKey, name, installId) =>
                   installSkill(state, skillKey, name, installId),
-                onDetailOpen: (key) => (state.skillsDetailKey = key),
+                onDetailOpen: (key) => {
+                  state.skillsDetailKey = key;
+                  state.skillsDetailTab = "overview";
+                },
                 onDetailClose: () => (state.skillsDetailKey = null),
+                onDetailTabChange: (tab) => {
+                  state.skillsDetailTab = tab;
+                  if (tab === "card" && state.skillsDetailKey) {
+                    void loadSkillCard(state, state.skillsDetailKey);
+                  }
+                },
                 onClawHubQueryChange: (query) => {
                   setClawHubSearchQuery(state, query);
                   if (clawhubSearchTimer) {
@@ -1754,7 +2733,7 @@ export function renderApp(state: AppViewState) {
             )
           : nothing}
         ${state.tab === "nodes"
-          ? lazyRender(lazyNodes, (m) =>
+          ? renderLazyView(lazyNodes, (m) =>
               m.renderNodes({
                 loading: state.nodesLoading,
                 nodes: state.nodes,
@@ -1783,7 +2762,7 @@ export function renderApp(state: AppViewState) {
                 onDeviceRotate: (deviceId, role, scopes) =>
                   rotateDeviceToken(state, { deviceId, role, scopes }),
                 onDeviceRevoke: (deviceId, role) => revokeDeviceToken(state, { deviceId, role }),
-                onLoadConfig: () => loadConfig(state),
+                onLoadConfig: () => loadConfig(state, { discardPendingChanges: true }),
                 onLoadExecApprovals: () => {
                   const target =
                     state.execApprovalsTarget === "node" && state.execApprovalsTargetNodeId
@@ -1832,151 +2811,213 @@ export function renderApp(state: AppViewState) {
             )
           : nothing}
         ${state.tab === "chat"
-          ? renderChat({
-              sessionKey: state.sessionKey,
-              onSessionKeyChange: (next) => {
-                switchChatSession(state, next);
+          ? renderMeasured(
+              state,
+              "chat",
+              {
+                messageCount: state.chatMessages.length,
+                toolMessageCount: state.chatToolMessages.length,
+                streamSegmentCount: state.chatStreamSegments.length,
+                queueCount: state.chatQueue.length,
               },
-              thinkingLevel: state.chatThinkingLevel,
-              showThinking,
-              showToolCalls,
-              loading: state.chatLoading,
-              sending: state.chatSending,
-              compactionStatus: state.compactionStatus,
-              fallbackStatus: state.fallbackStatus,
-              assistantAvatarUrl: chatAvatarUrl,
-              messages: state.chatMessages,
-              sideResult: state.chatSideResult,
-              toolMessages: state.chatToolMessages,
-              streamSegments: state.chatStreamSegments,
-              stream: state.chatStream,
-              streamStartedAt: state.chatStreamStartedAt,
-              draft: state.chatMessage,
-              queue: state.chatQueue,
-              connected: state.connected,
-              canSend: state.connected,
-              disabledReason: chatDisabledReason,
-              error: state.lastError,
-              sessions: state.sessionsResult,
-              focusMode: chatFocus,
-              autoExpandToolCalls: false,
-              onRefresh: () => {
-                state.chatSideResult = null;
-                state.resetToolStream();
-                return Promise.all([loadChatHistory(state), refreshChatAvatar(state)]);
-              },
-              onToggleFocusMode: () => {
-                if (state.onboarding) {
-                  return;
-                }
-                state.applySettings({
-                  ...state.settings,
-                  chatFocusMode: !state.settings.chatFocusMode,
-                });
-              },
-              onChatScroll: (event) => state.handleChatScroll(event),
-              getDraft: () => state.chatMessage,
-              onDraftChange: (next) => (state.chatMessage = next),
-              onRequestUpdate: requestHostUpdate,
-              attachments: state.chatAttachments,
-              onAttachmentsChange: (next) => (state.chatAttachments = next),
-              onSend: () => state.handleSendChat(),
-              canAbort: Boolean(state.chatRunId),
-              onAbort: () => void state.handleAbortChat(),
-              onQueueRemove: (id) => state.removeQueuedMessage(id),
-              onDismissSideResult: () => {
-                state.chatSideResult = null;
-              },
-              onNewSession: () => state.handleSendChat("/new", { restoreDraft: true }),
-              onClearHistory: async () => {
-                if (!state.client || !state.connected) {
-                  return;
-                }
-                try {
-                  await state.client.request("sessions.reset", { key: state.sessionKey });
-                  state.chatMessages = [];
-                  state.chatSideResult = null;
-                  state.chatStream = null;
-                  state.chatRunId = null;
-                  await loadChatHistory(state);
-                } catch (err) {
-                  state.lastError = String(err);
-                }
-              },
-              agentsList: state.agentsList,
-              currentAgentId: resolvedAgentId ?? "main",
-              onAgentChange: (agentId: string) => {
-                switchChatSession(state, buildAgentMainSessionKey({ agentId }));
-              },
-              onNavigateToAgent: () => {
-                state.agentsSelectedId = resolvedAgentId;
-                state.setTab("agents" as import("./navigation.ts").Tab);
-              },
-              onSessionSelect: (key: string) => {
-                switchChatSession(state, key);
-              },
-              showNewMessages: state.chatNewMessagesBelow && !state.chatManualRefreshInFlight,
-              onScrollToBottom: () => state.scrollToBottom(),
-              // Sidebar props for tool output viewing
-              sidebarOpen: state.sidebarOpen,
-              sidebarContent: state.sidebarContent,
-              sidebarError: state.sidebarError,
-              splitRatio: state.splitRatio,
-              canvasHostUrl: state.hello?.canvasHostUrl ?? null,
-              onOpenSidebar: (content) => state.handleOpenSidebar(content),
-              onCloseSidebar: () => state.handleCloseSidebar(),
-              onSplitRatioChange: (ratio: number) => state.handleSplitRatioChange(ratio),
-              assistantName: state.assistantName,
-              assistantAvatar: state.assistantAvatar,
-              localMediaPreviewRoots: state.localMediaPreviewRoots,
-              embedSandboxMode: state.embedSandboxMode,
-              allowExternalEmbedUrls: state.allowExternalEmbedUrls,
-              assistantAttachmentAuthToken: resolveAssistantAttachmentAuthToken(state),
-              basePath: state.basePath ?? "",
-            })
+              () =>
+                renderChat({
+                  sessionKey: state.sessionKey,
+                  onSessionKeyChange: (next) => {
+                    switchChatSession(state, next);
+                  },
+                  thinkingLevel: state.chatThinkingLevel,
+                  showThinking,
+                  showToolCalls,
+                  loading: state.chatLoading,
+                  sending: state.chatSending,
+                  compactionStatus: state.compactionStatus,
+                  fallbackStatus: state.fallbackStatus,
+                  assistantAvatarUrl: chatAvatarUrl,
+                  messages: state.chatMessages,
+                  sideResult: state.chatSideResult,
+                  toolMessages: state.chatToolMessages,
+                  streamSegments: state.chatStreamSegments,
+                  stream: state.chatStream,
+                  streamStartedAt: state.chatStreamStartedAt,
+                  draft: state.chatMessage,
+                  queue: state.chatQueue,
+                  realtimeTalkActive: state.realtimeTalkActive,
+                  realtimeTalkStatus: state.realtimeTalkStatus,
+                  realtimeTalkDetail: state.realtimeTalkDetail,
+                  realtimeTalkTranscript: state.realtimeTalkTranscript,
+                  realtimeTalkConversation: state.realtimeTalkConversation,
+                  realtimeTalkOptionsOpen: state.realtimeTalkOptionsOpen,
+                  realtimeTalkOptions: state.realtimeTalkOptions,
+                  connected: state.connected,
+                  canSend: state.connected,
+                  disabledReason: chatDisabledReason,
+                  error: state.lastError,
+                  runStatus: state.chatRunStatus,
+                  onDismissError: () => dismissChatError(state),
+                  sessions: state.sessionsResult,
+                  focusMode: chatFocus,
+                  autoExpandToolCalls: false,
+                  onRefresh: () => {
+                    state.chatSideResult = null;
+                    state.resetToolStream();
+                    return refreshChat(state, { awaitHistory: true, scheduleScroll: false });
+                  },
+                  onToggleFocusMode: () => {
+                    if (state.onboarding) {
+                      return;
+                    }
+                    state.applySettings({
+                      ...state.settings,
+                      chatFocusMode: !state.settings.chatFocusMode,
+                    });
+                  },
+                  onChatScroll: (event) => state.handleChatScroll(event),
+                  getDraft: () => state.chatMessage,
+                  onDraftChange: (next) => state.handleChatDraftChange(next),
+                  onRequestUpdate: requestHostUpdate,
+                  onHistoryKeydown: (input) => state.handleChatInputHistoryKey(input),
+                  attachments: state.chatAttachments,
+                  onAttachmentsChange: (next) => (state.chatAttachments = next),
+                  onSend: () => state.handleSendChat(),
+                  onCompact: () => state.handleSendChat("/compact", { restoreDraft: true }),
+                  onOpenSessionCheckpoints: () => {
+                    state.sessionsExpandedCheckpointKey = state.sessionKey;
+                    state.setTab("sessions" as import("./navigation.ts").Tab);
+                    void loadSessions(state, {
+                      ...createChatSessionsLoadOverrides(state),
+                    });
+                  },
+                  onToggleRealtimeTalk: () => state.toggleRealtimeTalk(),
+                  onToggleRealtimeTalkOptions: () => {
+                    state.realtimeTalkOptionsOpen = !state.realtimeTalkOptionsOpen;
+                  },
+                  onRealtimeTalkOptionsChange: (next) => state.updateRealtimeTalkOptions(next),
+                  canAbort: hasAbortableSessionRun(state),
+                  onAbort: () => void state.handleAbortChat({ preserveDraft: true }),
+                  onQueueRemove: (id) => state.removeQueuedMessage(id),
+                  onQueueRetry: (id) => void state.retryQueuedChatMessage(id),
+                  onQueueSteer: (id) => void state.steerQueuedChatMessage(id),
+                  onDismissSideResult: () => {
+                    state.chatSideResult = null;
+                  },
+                  onNewSession: () => void createChatSession(state),
+                  onClearHistory: async () => {
+                    if (!state.client || !state.connected) {
+                      return;
+                    }
+                    const hadActiveRun = hasAbortableSessionRun(state);
+                    try {
+                      await state.client.request("sessions.reset", {
+                        key: state.sessionKey,
+                        ...scopedAgentParamsForSession(state, state.sessionKey),
+                      });
+                      state.chatMessages = [];
+                      state.chatSideResult = null;
+                      reconcileChatRunLifecycle(
+                        state as unknown as Parameters<typeof reconcileChatRunLifecycle>[0],
+                        {
+                          outcome: hadActiveRun ? "interrupted" : undefined,
+                          sessionStatus: "killed",
+                          runId: state.chatRunId,
+                          sessionKey: state.sessionKey,
+                          clearLocalRun: true,
+                          clearChatStream: true,
+                          clearToolStream: true,
+                          clearSideResultTerminalRuns: true,
+                          clearRunStatus: !hadActiveRun,
+                        },
+                      );
+                      await loadChatHistory(state);
+                    } catch (err) {
+                      state.lastError = String(err);
+                    }
+                  },
+                  agentsList: state.agentsList,
+                  currentAgentId: resolvedAgentId ?? "main",
+                  onAgentChange: (agentId: string) => {
+                    switchChatSession(state, buildAgentMainSessionKey({ agentId }));
+                  },
+                  onNavigateToAgent: () => {
+                    state.agentsSelectedId = resolvedAgentId;
+                    state.setTab("agents" as import("./navigation.ts").Tab);
+                  },
+                  onSessionSelect: (key: string) => {
+                    switchChatSession(state, key);
+                  },
+                  showNewMessages: state.chatNewMessagesBelow && !state.chatManualRefreshInFlight,
+                  onScrollToBottom: () => state.scrollToBottom(),
+                  // Sidebar props for tool output viewing
+                  sidebarOpen: state.sidebarOpen,
+                  sidebarContent: state.sidebarContent,
+                  sidebarError: state.sidebarError,
+                  splitRatio: state.splitRatio,
+                  canvasPluginSurfaceUrl: state.hello?.pluginSurfaceUrls?.canvas ?? null,
+                  onOpenSidebar: (content) => state.handleOpenSidebar(content),
+                  onCloseSidebar: () => state.handleCloseSidebar(),
+                  onSplitRatioChange: (ratio: number) => state.handleSplitRatioChange(ratio),
+                  assistantName: state.assistantName,
+                  assistantAvatar: effectiveAssistantAvatar,
+                  userName: state.userName ?? null,
+                  userAvatar: state.userAvatar ?? null,
+                  localMediaPreviewRoots: state.localMediaPreviewRoots,
+                  embedSandboxMode: state.embedSandboxMode,
+                  allowExternalEmbedUrls: state.allowExternalEmbedUrls,
+                  assistantAttachmentAuthToken: resolveAssistantAttachmentAuthToken(state),
+                  basePath: state.basePath ?? "",
+                }),
+            )
           : nothing}
-        ${renderConfigTabForActiveTab()}
+        ${isSettingsTab(state.tab) && state.tab !== "debug" && state.tab !== "logs"
+          ? renderSettingsWorkspace(state, renderConfigTabForActiveTab())
+          : renderConfigTabForActiveTab()}
         ${state.tab === "debug"
-          ? lazyRender(lazyDebug, (m) =>
-              m.renderDebug({
-                loading: state.debugLoading,
-                status: state.debugStatus,
-                health: state.debugHealth,
-                models: state.debugModels,
-                heartbeat: state.debugHeartbeat,
-                eventLog: state.eventLog,
-                methods: (state.hello?.features?.methods ?? []).toSorted(),
-                callMethod: state.debugCallMethod,
-                callParams: state.debugCallParams,
-                callResult: state.debugCallResult,
-                callError: state.debugCallError,
-                onCallMethodChange: (next) => (state.debugCallMethod = next),
-                onCallParamsChange: (next) => (state.debugCallParams = next),
-                onRefresh: () => loadDebug(state),
-                onCall: () => callDebugMethod(state),
-              }),
+          ? renderSettingsWorkspace(
+              state,
+              renderLazyView(lazyDebug, (m) =>
+                m.renderDebug({
+                  loading: state.debugLoading,
+                  status: state.debugStatus,
+                  health: state.debugHealth,
+                  models: state.debugModels,
+                  heartbeat: state.debugHeartbeat,
+                  eventLog: state.eventLog,
+                  methods: (state.hello?.features?.methods ?? []).toSorted(),
+                  callMethod: state.debugCallMethod,
+                  callParams: state.debugCallParams,
+                  callResult: state.debugCallResult,
+                  callError: state.debugCallError,
+                  onCallMethodChange: (next) => (state.debugCallMethod = next),
+                  onCallParamsChange: (next) => (state.debugCallParams = next),
+                  onRefresh: () => loadDebug(state),
+                  onCall: () => callDebugMethod(state),
+                }),
+              ),
             )
           : nothing}
         ${state.tab === "logs"
-          ? lazyRender(lazyLogs, (m) =>
-              m.renderLogs({
-                loading: state.logsLoading,
-                error: state.logsError,
-                file: state.logsFile,
-                entries: state.logsEntries,
-                filterText: state.logsFilterText,
-                levelFilters: state.logsLevelFilters,
-                autoFollow: state.logsAutoFollow,
-                truncated: state.logsTruncated,
-                onFilterTextChange: (next) => (state.logsFilterText = next),
-                onLevelToggle: (level, enabled) => {
-                  state.logsLevelFilters = { ...state.logsLevelFilters, [level]: enabled };
-                },
-                onToggleAutoFollow: (next) => (state.logsAutoFollow = next),
-                onRefresh: () => loadLogs(state, { reset: true }),
-                onExport: (lines, label) => state.exportLogs(lines, label),
-                onScroll: (event) => state.handleLogsScroll(event),
-              }),
+          ? renderSettingsWorkspace(
+              state,
+              renderLazyView(lazyLogs, (m) =>
+                m.renderLogs({
+                  loading: state.logsLoading,
+                  error: state.logsError,
+                  file: state.logsFile,
+                  entries: state.logsEntries,
+                  filterText: state.logsFilterText,
+                  levelFilters: state.logsLevelFilters,
+                  autoFollow: state.logsAutoFollow,
+                  truncated: state.logsTruncated,
+                  onFilterTextChange: (next) => (state.logsFilterText = next),
+                  onLevelToggle: (level, enabled) => {
+                    state.logsLevelFilters = { ...state.logsLevelFilters, [level]: enabled };
+                  },
+                  onToggleAutoFollow: (next) => (state.logsAutoFollow = next),
+                  onRefresh: () => loadLogs(state, { reset: true }),
+                  onExport: (lines, label) => state.exportLogs(lines, label),
+                  onScroll: (event) => state.handleLogsScroll(event),
+                }),
+              ),
             )
           : nothing}
         ${state.tab === "dreams"
@@ -2041,7 +3082,15 @@ export function renderApp(state: AppViewState) {
             })
           : nothing}
       </main>
-      ${renderExecApprovalPrompt(state)} ${renderGatewayUrlConfirmation(state)} ${nothing}
+      ${renderExecApprovalPrompt(state)} ${renderGatewayUrlConfirmation(state)}
+      ${renderDreamingRestartConfirmation({
+        open: state.dreamingRestartConfirmOpen,
+        loading: state.dreamingRestartConfirmLoading,
+        onConfirm: confirmDreamingRestart,
+        onCancel: cancelDreamingRestart,
+        hasError: Boolean(state.dreamingStatusError),
+      })}
+      ${nothing}
     </div>
   `;
 }

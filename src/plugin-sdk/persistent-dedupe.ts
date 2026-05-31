@@ -1,4 +1,5 @@
 import { createDedupeCache } from "../infra/dedupe.js";
+import { resolveNonNegativeIntegerOption } from "../infra/numeric-options.js";
 import type { FileLockOptions } from "./file-lock.js";
 import { withFileLock } from "./file-lock.js";
 import { readJsonFileWithFallback, writeJsonFileAtomically } from "./json-store.js";
@@ -148,12 +149,41 @@ function isRecentTimestamp(seenAt: number | undefined, ttlMs: number, now: numbe
 
 /** Create a dedupe helper that combines in-memory fast checks with a lock-protected disk store. */
 export function createPersistentDedupe(options: PersistentDedupeOptions): PersistentDedupe {
-  const ttlMs = Math.max(0, Math.floor(options.ttlMs));
-  const memoryMaxSize = Math.max(0, Math.floor(options.memoryMaxSize));
-  const fileMaxEntries = Math.max(1, Math.floor(options.fileMaxEntries));
+  const ttlMs = resolveNonNegativeIntegerOption(options.ttlMs, 0);
+  const memoryMaxSize = resolveNonNegativeIntegerOption(options.memoryMaxSize, 0);
+  const fileMaxEntries = Math.max(1, resolveNonNegativeIntegerOption(options.fileMaxEntries, 1));
   const lockOptions = mergeLockOptions(options.lockOptions);
   const memory = createDedupeCache({ ttlMs, maxSize: memoryMaxSize });
   const inflight = new Map<string, Promise<boolean>>();
+  // In-process write queue per file path. `withFileLock` is re-entrant
+  // within the same process (a second caller for the same path gets
+  // immediate access instead of waiting), so two concurrent
+  // checkAndRecordInner calls for different keys but the same file can
+  // race: both read the same stale data, and the last writer's
+  // writeJsonFileAtomically silently overwrites the first writer's
+  // additions. This queue serializes all read-modify-write cycles
+  // targeting the same file within this process, preventing the lost
+  // update while still allowing cross-process file-lock contention to
+  // be handled by the file lock itself.
+  const fileWriteQueues = new Map<string, Promise<unknown>>();
+
+  function enqueueFileWrite<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+    const prev = fileWriteQueues.get(filePath) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    fileWriteQueues.set(filePath, next);
+    // Cleanup: remove the queue entry once this link settles, but only if
+    // no newer work was chained after us. The `.catch(() => {})` prevents
+    // an unhandled rejection when `next` rejects — callers still observe
+    // the rejection through the returned `next` promise directly.
+    next
+      .finally(() => {
+        if (fileWriteQueues.get(filePath) === next) {
+          fileWriteQueues.delete(filePath);
+        }
+      })
+      .catch(() => {});
+    return next;
+  }
 
   async function checkAndRecordInner(
     key: string,
@@ -168,19 +198,21 @@ export function createPersistentDedupe(options: PersistentDedupeOptions): Persis
 
     const path = options.resolveFilePath(namespace);
     try {
-      const duplicate = await withFileLock(path, lockOptions, async () => {
-        const { value } = await readJsonFileWithFallback<PersistentDedupeData>(path, {});
-        const data = sanitizeData(value);
-        const seenAt = data[key];
-        const isRecent = seenAt != null && (ttlMs <= 0 || now - seenAt < ttlMs);
-        if (isRecent) {
-          return true;
-        }
-        data[key] = now;
-        pruneData(data, now, ttlMs, fileMaxEntries);
-        await writeJsonFileAtomically(path, data);
-        return false;
-      });
+      const duplicate = await enqueueFileWrite(path, () =>
+        withFileLock(path, lockOptions, async () => {
+          const { value } = await readJsonFileWithFallback<PersistentDedupeData>(path, {});
+          const data = sanitizeData(value);
+          const seenAt = data[key];
+          const isRecent = seenAt != null && (ttlMs <= 0 || now - seenAt < ttlMs);
+          if (isRecent) {
+            return true;
+          }
+          data[key] = now;
+          pruneData(data, now, ttlMs, fileMaxEntries);
+          await writeJsonFileAtomically(path, data);
+          return false;
+        }),
+      );
       return !duplicate;
     } catch (error) {
       onDiskError?.(error);
@@ -293,15 +325,15 @@ function createReleasedClaimError(scopedKey: string): Error {
 
 /** Create a claim/commit/release dedupe guard backed by memory and optional persistent storage. */
 export function createClaimableDedupe(options: ClaimableDedupeOptions): ClaimableDedupe {
-  const ttlMs = Math.max(0, Math.floor(options.ttlMs));
-  const memoryMaxSize = Math.max(0, Math.floor(options.memoryMaxSize));
+  const ttlMs = resolveNonNegativeIntegerOption(options.ttlMs, 0);
+  const memoryMaxSize = resolveNonNegativeIntegerOption(options.memoryMaxSize, 0);
   const memory = createDedupeCache({ ttlMs, maxSize: memoryMaxSize });
   const persistent =
     options.resolveFilePath != null
       ? createPersistentDedupe({
           ttlMs,
           memoryMaxSize,
-          fileMaxEntries: Math.max(1, Math.floor(options.fileMaxEntries)),
+          fileMaxEntries: Math.max(1, resolveNonNegativeIntegerOption(options.fileMaxEntries, 1)),
           resolveFilePath: options.resolveFilePath,
           lockOptions: options.lockOptions,
           onDiskError: options.onDiskError,

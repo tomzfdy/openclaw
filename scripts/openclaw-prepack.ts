@@ -1,17 +1,18 @@
 #!/usr/bin/env -S node --import tsx
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { formatErrorMessage } from "../src/infra/errors.ts";
 import { writePackageDistInventory } from "../src/infra/package-dist-inventory.ts";
-
-const skipPrepackPreparedEnv = "OPENCLAW_PREPACK_PREPARED";
+import { preparePackageChangelog } from "./package-changelog.mjs";
+import { createPnpmRunnerSpawnSpec } from "./pnpm-runner.mjs";
 const requiredPreparedPathGroups = [
   ["dist/index.js", "dist/index.mjs"],
   ["dist/control-ui/index.html"],
 ];
 const requiredControlUiAssetPrefix = "dist/control-ui/assets/";
+const DEFAULT_PREPACK_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
 
 type PreparedFileReader = {
   existsSync: typeof existsSync;
@@ -20,14 +21,6 @@ type PreparedFileReader = {
 
 function normalizeFiles(files: Iterable<string>): Set<string> {
   return new Set(Array.from(files, (file) => file.replace(/\\/g, "/")));
-}
-
-export function shouldSkipPrepack(env = process.env): boolean {
-  const raw = env[skipPrepackPreparedEnv];
-  if (!raw) {
-    return false;
-  }
-  return !/^(0|false)$/i.test(raw);
 }
 
 export function collectPreparedPrepackErrors(
@@ -83,9 +76,7 @@ function ensurePreparedArtifacts(): void {
     const preparedFiles = collectPreparedFilePaths();
     const errors = collectPreparedPrepackErrors(preparedFiles.files, preparedFiles.assets);
     if (errors.length === 0) {
-      console.error(
-        `prepack: using prepared artifacts from ${skipPrepackPreparedEnv}; skipping rebuild.`,
-      );
+      console.error("prepack: using existing prepared artifacts.");
       return;
     }
     for (const error of errors) {
@@ -97,20 +88,61 @@ function ensurePreparedArtifacts(): void {
   }
 
   console.error(
-    `prepack: ${skipPrepackPreparedEnv}=1 requires an existing build and Control UI bundle. Run \`pnpm build && pnpm ui:build\` first or unset ${skipPrepackPreparedEnv}.`,
+    "prepack: requires an existing build and Control UI bundle. Run `pnpm build && pnpm ui:build` before packing or publishing.",
   );
   process.exit(1);
 }
 
-function run(command: string, args: string[]): void {
-  const result = spawnSync(command, args, {
+function positiveEnvInt(name: string, env: NodeJS.ProcessEnv, fallback: number): number {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw === "" || !/^[0-9]+$/u.test(raw)) {
+    return fallback;
+  }
+  const value = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+export function resolvePrepackCommandTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveEnvInt(
+    "OPENCLAW_PREPACK_COMMAND_TIMEOUT_MS",
+    env,
+    DEFAULT_PREPACK_COMMAND_TIMEOUT_MS,
+  );
+}
+
+export function runPrepackCommand(
+  command: string,
+  args: string[],
+  options: SpawnSyncOptions = {},
+): ReturnType<typeof spawnSync> {
+  const env = options.env ?? process.env;
+  return spawnSync(command, args, {
     stdio: "inherit",
-    env: process.env,
+    ...options,
+    env,
+    killSignal: options.killSignal ?? "SIGKILL",
+    timeout: options.timeout ?? resolvePrepackCommandTimeoutMs(env),
   });
+}
+
+function run(command: string, args: string[], options: SpawnSyncOptions = {}): void {
+  const result = runPrepackCommand(command, args, options);
   if (result.status === 0) {
     return;
   }
+  if (result.error) {
+    console.error(`prepack: ${command} failed: ${formatErrorMessage(result.error)}`);
+  }
   process.exit(result.status ?? 1);
+}
+
+function runPnpm(args: string[]): void {
+  const command = createPnpmRunnerSpawnSpec({
+    env: process.env,
+    pnpmArgs: args,
+    stdio: "inherit",
+  });
+  run(command.command, command.args, command.options);
 }
 
 function runBuildSmoke(): void {
@@ -122,17 +154,12 @@ async function writeDistInventory(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  if (shouldSkipPrepack()) {
-    ensurePreparedArtifacts();
-    await writeDistInventory();
-    runBuildSmoke();
-    return;
-  }
-  run(pnpmCommand, ["build"]);
-  run(pnpmCommand, ["ui:build"]);
+  runPnpm(["build"]);
+  runPnpm(["ui:build"]);
+  ensurePreparedArtifacts();
   await writeDistInventory();
   runBuildSmoke();
+  await preparePackageChangelog();
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

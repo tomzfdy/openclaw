@@ -49,6 +49,44 @@
         "OPENCLAW_GATEWAY_PORT": "19001",
         "OPENCLAW_SKIP_CHANNELS": "1"
       }
+    },
+    {
+      "name": "Debug Gateway (entry.js + path overrides)",
+      "type": "node",
+      "request": "launch",
+      "preLaunchTask": "debug:rebuild",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--stack-size=8192"],
+      "program": "${workspaceFolder}/dist/entry.js",
+      "args": ["gateway", "run", "--dev"],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "node_modules/**"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "sourceMaps": true,
+      "smartStep": true,
+      "trace": true,
+      "sourceMapPathOverrides": {
+        "../src/*": "${workspaceFolder}/src/*",
+        "../src/**/*": "${workspaceFolder}/src/**/*"
+      },
+      "env": {
+        "OUTPUT_SOURCE_MAPS": "1",
+        "OPENCLAW_PROFILE": "dev",
+        "OPENCLAW_GATEWAY_PORT": "19003",
+        "OPENCLAW_SKIP_CHANNELS": "1"
+      }
+    },
+    {
+      "name": "Debug Gateway (attach mode)",
+      "type": "node",
+      "request": "attach",
+      "preLaunchTask": "debug:start-gateway-inspect",
+      "port": 19006,
+      "address": "localhost",
+      "localRoot": "${workspaceFolder}",
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "sourceMaps": true,
+      "restart": true
     }
   ]
 }

@@ -24,6 +24,8 @@
       "node"
     ],
     "useDefineForClassFields": false,
+    "sourceMap": true,
+    "inlineSourceMap": false,
     "verbatimModuleSyntax": true,
     "paths": {
       "openclaw/extension-api": ["./src/extensionAPI.ts"],

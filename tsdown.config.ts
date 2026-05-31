@@ -138,11 +138,7 @@ function nodeBuildConfig(config: UserConfig): UserConfig {
     env,
     fixedExtension: false,
     platform: "node",
-<<<<<<< HEAD
-    sourcemap: shouldEmitSourceMap,
-=======
     sourcemap: OUTPUT_SOURCE_MAPS,
->>>>>>> main
     inputOptions: buildInputOptions,
   };
 }

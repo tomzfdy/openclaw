@@ -9,7 +9,8 @@
     {
       "label": "debug:rebuild",
       "type": "shell",
-      "command": "pnpm clean:dist && pnpm build",
+      "command": "node",
+      "args": ["scripts/tsdown-build.mjs"],
       "group": "none",
       "problemMatcher": [],
       "presentation": {

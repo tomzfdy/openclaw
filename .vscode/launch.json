@@ -1,69 +1,38 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Launch OpenClaw Gateway (direct)",
-            "type": "node",
-            "request": "launch",
-            "runtimeExecutable": "node",
-            "env": {
-                "OPENCLAW_BUILD_SOURCEMAP": "1"
-            },
-            "runtimeArgs": [
-                "--inspect-brk=9229",
-                "openclaw.mjs",
-                "gateway",
-                "--force"
-            ],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "sourceMaps": true,
-            "outFiles": [
-                "${workspaceFolder}/dist/**/*.js"
-            ]
-        },
-        {
-            "name": "Attach to OpenClaw Watch Child",
-            "type": "node",
-            "request": "attach",
-            "port": 9229,
-            "restart": true,
-            "sourceMaps": true,
-            "outFiles": [
-                "${workspaceFolder}/dist/**/*.js"
-            ],
-            "resolveSourceMapLocations": [
-                "${workspaceFolder}/dist/**/*.js",
-                "!**/node_modules/**"
-            ]
-        },
-
-        {
-        "name": "Rebuild and Debug Gateway",
-        "type": "node",
-        "request": "launch",
-        "preLaunchTask": "debug:rebuild",
-        "program": "${workspaceFolder}/openclaw.mjs",
-        "args": ["gateway", "run"],
-        "console": "integratedTerminal",
-        "skipFiles": ["<node_internals>/**", "node_modules/**"],
-        "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-        "sourceMaps": true,
-        "smartStep": true,
-        "internalConsoleOptions": "openOnSessionStart"
-        },
-        {
-        "name": "Debug Gateway",
-        "type": "node",
-        "request": "launch",
-        "program": "${workspaceFolder}/openclaw.mjs",
-        "args": ["gateway", "run"],
-        "console": "integratedTerminal",
-        "skipFiles": ["<node_internals>/**", "node_modules/**"],
-        "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-        "sourceMaps": true,
-        "smartStep": true,
-        "internalConsoleOptions": "openOnSessionStart"
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Rebuild and Debug Gateway",
+      "type": "node",
+      "request": "launch",
+      "preLaunchTask": "debug:rebuild",
+      "program": "${workspaceFolder}/openclaw.mjs",
+      "args": ["gateway", "run"],
+      "env": {
+        "OUTPUT_SOURCE_MAPS": "1"
+      },
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "node_modules/**"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "sourceMaps": true,
+      "smartStep": true,
+      "internalConsoleOptions": "openOnSessionStart"
+    },
+    {
+      "name": "Debug Gateway",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/openclaw.mjs",
+      "args": ["gateway", "run"],
+      "env": {
+        "OUTPUT_SOURCE_MAPS": "1"
+      },
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "node_modules/**"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "sourceMaps": true,
+      "smartStep": true,
+      "internalConsoleOptions": "openOnSessionStart"
+    }
+  ]
 }
